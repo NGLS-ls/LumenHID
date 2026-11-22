@@ -1,5 +1,4 @@
 import {
-  BookOpen,
   Cpu,
   Headphones,
   Keyboard,
@@ -25,7 +24,6 @@ const NAV_ITEMS: { id: NavSection; label: string; icon: typeof Cpu }[] = [
   { id: 'keyboard', label: '键盘与轴体', icon: Keyboard },
   { id: 'macros', label: '宏工作台', icon: Workflow },
   { id: 'audio', label: '音频与声场', icon: Headphones },
-  { id: 'docs', label: '工程与文档', icon: BookOpen },
 ];
 
 const PROTOCOL_TEXT: Record<PeripheralDevice['activeProtocol'], string> = {
@@ -33,6 +31,12 @@ const PROTOCOL_TEXT: Record<PeripheralDevice['activeProtocol'], string> = {
   bluetooth: '蓝牙',
   usb: 'USB',
 };
+
+function formatCompactBattery(dev: PeripheralDevice): string {
+  if (dev.batteryPercent !== null) return `${dev.batteryPercent}%`;
+  if (dev.batterySource === 'wired' || dev.activeProtocol === 'usb') return '有线';
+  return '--';
+}
 
 export function Sidebar({
   activeSection,
@@ -45,10 +49,17 @@ export function Sidebar({
 }: SidebarProps) {
   const navContent = (
     <div className="flex h-full flex-col bg-white border-r border-[#E5E9EE]">
-      <div className="flex h-16 items-center justify-between px-6 border-b border-[#E5E9EE]">
-        <span className="text-[17px] font-semibold tracking-tight text-[#181C20] whitespace-nowrap shrink-0">
-          LumenHID
-        </span>
+      <div className="flex h-16 items-center justify-between px-5 border-b border-[#E5E9EE]">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <img
+            src="/lumen-icon.svg"
+            alt="LumenHID 标志"
+            className="h-7 w-7 rounded-lg shrink-0"
+          />
+          <span className="text-[17px] font-semibold tracking-tight text-[#181C20] whitespace-nowrap shrink-0">
+            LumenHID
+          </span>
+        </div>
         <button
           type="button"
           onClick={onCloseMobile}
@@ -89,51 +100,58 @@ export function Sidebar({
 
         <div className="mt-8 border-t border-[#E5E9EE] pt-5 px-2">
           <div className="mb-3 flex items-center justify-between text-xs font-medium text-[#84909D]">
-            <span>已连接外设</span>
+            <span>本机已识别外设</span>
             <span className="font-mono tabular-nums">
               {devices.filter((d) => d.connected).length}/{devices.length}
             </span>
           </div>
-          <ul className="space-y-1.5">
-            {devices.map((dev) => {
-              const selected = dev.id === activeDeviceId;
-              return (
-                <li key={dev.id}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSelectDevice(dev);
-                      onCloseMobile();
-                    }}
-                    className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors ${
-                      selected
-                        ? 'bg-[#F0F3F6] text-[#181C20]'
-                        : 'text-[#586370] hover:bg-[#F6F7F9] hover:text-[#181C20]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-[13px] font-medium">{dev.name}</span>
-                      <span className="font-mono text-[11px] tabular-nums text-[#84909D] shrink-0">
-                        {dev.batteryPercent !== null ? `${dev.batteryPercent}%` : '有线'}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#84909D]">
-                      <span>{PROTOCOL_TEXT[dev.activeProtocol]}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{dev.connected ? '已连接' : '休眠中'}</span>
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+
+          {devices.length === 0 ? (
+            <p className="px-1.5 text-xs leading-relaxed text-[#84909D]">
+              暂未识别到外接键鼠或蓝牙耳机，请点击「扫描本机外设」。
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {devices.map((dev) => {
+                const selected = dev.id === activeDeviceId;
+                return (
+                  <li key={dev.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectDevice(dev);
+                        onCloseMobile();
+                      }}
+                      className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors ${
+                        selected
+                          ? 'bg-[#F0F3F6] text-[#181C20]'
+                          : 'text-[#586370] hover:bg-[#F6F7F9] hover:text-[#181C20]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-[13px] font-medium">{dev.name}</span>
+                        <span className="font-mono text-[11px] tabular-nums text-[#2B6B68] shrink-0">
+                          {formatCompactBattery(dev)}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#84909D]">
+                        <span>{PROTOCOL_TEXT[dev.activeProtocol]}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{dev.connected ? '已连接' : '已断开'}</span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       </nav>
 
       <div className="border-t border-[#E5E9EE] px-5 py-3.5 text-xs text-[#84909D]">
         <div className="flex items-center justify-between">
           <span>免安装便携配置</span>
-          <span className="font-mono tabular-nums text-[#586370]">v1.0.0</span>
+          <span className="font-mono tabular-nums text-[#586370]">v2.0.0</span>
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Menu, Save } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { DevicesView } from './components/DevicesView';
@@ -6,18 +6,15 @@ import { MouseView } from './components/MouseView';
 import { KeyboardView } from './components/KeyboardView';
 import { MacroStudioView } from './components/MacroStudioView';
 import { AudioStudioView } from './components/AudioStudioView';
-import { DocsHubView } from './components/DocsHubView';
 import {
-  INITIAL_AUDIO_CONFIG,
-  INITIAL_DEVICES,
-  INITIAL_KEYBOARD_CONFIG,
+  DEFAULT_AUDIO_CONFIG,
+  DEFAULT_KEYBOARD_CONFIG,
+  DEFAULT_MOUSE_CONFIG,
   INITIAL_MACROS,
-  INITIAL_MOUSE_CONFIG,
 } from './data/seedDevices';
 import type {
   AppProfileSnapshot,
   AudioConfig,
-  ConnectionProtocol,
   KeyboardConfig,
   MacroDefinition,
   MouseConfig,
@@ -29,6 +26,7 @@ import {
   downloadTextFile,
   isTauriRuntime,
   loadSavedProfile,
+  refreshNativeBatteries,
   saveProfileSnapshot,
   scanNativeWindowsDevices,
   syncAudioHardware,
@@ -43,7 +41,6 @@ const SECTION_BREADCRUMBS: Record<NavSection, string> = {
   keyboard: '键盘与轴体',
   macros: '宏工作台',
   audio: '音频与声场',
-  docs: '工程与文档',
 };
 
 export default function App() {
@@ -51,84 +48,128 @@ export default function App() {
 
   const [activeSection, setActiveSection] = useState<NavSection>('devices');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   const [devices, setDevices] = useState<PeripheralDevice[]>(
-    initialSnapshot?.devices ?? INITIAL_DEVICES
+    initialSnapshot?.devices ?? []
   );
   const [activeDeviceId, setActiveDeviceId] = useState<string>(
-    initialSnapshot?.activeDeviceId ?? INITIAL_DEVICES[0].id
+    initialSnapshot?.activeDeviceId ?? ''
   );
   const [mouseConfig, setMouseConfig] = useState<MouseConfig>(
-    initialSnapshot?.mouseConfig ?? INITIAL_MOUSE_CONFIG
+    initialSnapshot?.mouseConfig ?? DEFAULT_MOUSE_CONFIG
   );
   const [keyboardConfig, setKeyboardConfig] = useState<KeyboardConfig>(
-    initialSnapshot?.keyboardConfig ?? INITIAL_KEYBOARD_CONFIG
+    initialSnapshot?.keyboardConfig ?? DEFAULT_KEYBOARD_CONFIG
   );
   const [macros, setMacros] = useState<MacroDefinition[]>(
     initialSnapshot?.macros ?? INITIAL_MACROS
   );
   const [audioConfig, setAudioConfig] = useState<AudioConfig>(
-    initialSnapshot?.audioConfig ?? INITIAL_AUDIO_CONFIG
+    initialSnapshot?.audioConfig ?? DEFAULT_AUDIO_CONFIG
   );
 
   const [notice, setNotice] = useState<string | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
 
-  const showNotice = (msg: string) => {
+  const showNotice = useCallback((msg: string) => {
     setNotice(msg);
-  };
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(null), 2600);
+    const timer = window.setTimeout(() => setNotice(null), 2800);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  // Auto-discover real Windows native HID ports when running inside portable Tauri EXE
+  const mergeScannedDevices = useCallback((found: PeripheralDevice[]) => {
+    setDevices(found);
+    setActiveDeviceId((prev) => {
+      if (prev && found.some((d) => d.id === prev)) return prev;
+      return found[0]?.id ?? '';
+    });
+  }, []);
+
+  // Auto-discover real Windows native HID & Bluetooth PnP devices asynchronously on launch
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let cancelled = false;
+    setScanning(true);
     void scanNativeWindowsDevices().then((nativeDevs) => {
-      if (cancelled || nativeDevs.length === 0) return;
-      setDevices((prev) => {
-        const existingKeys = new Set(prev.map((d) => `${d.vendorId}:${d.productId}`));
-        const fresh = nativeDevs.filter((d) => !existingKeys.has(`${d.vendorId}:${d.productId}`));
-        return fresh.length > 0 ? [...fresh, ...prev] : prev;
-      });
+      if (cancelled) return;
+      mergeScannedDevices(nativeDevs);
+      setScanning(false);
     });
     return () => {
       cancelled = true;
     };
+  }, [mergeScannedDevices]);
+
+  // Periodic light battery refresh every 30s in desktop runtime (non-blocking async Rust)
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const interval = window.setInterval(() => {
+      void refreshNativeBatteries().then((updates) => {
+        if (updates.length === 0) return;
+        setDevices((prev) =>
+          prev.map((dev) => {
+            const hit = updates.find(
+              (u) =>
+                (u.vendor_id === dev.vendorId && u.product_id === dev.productId) ||
+                u.product_name === dev.name
+            );
+            if (!hit || hit.battery_percent === null) return dev;
+            return {
+              ...dev,
+              batteryPercent: hit.battery_percent,
+              batterySource: hit.battery_source,
+            };
+          })
+        );
+      });
+    }, 30000);
+    return () => window.clearInterval(interval);
   }, []);
 
-  // Auto-persist portable snapshot cleanly whenever state changes
+  // Debounced auto-persist (450ms) so dragging sliders never blocks UI frames or disk I/O
   useEffect(() => {
-    const snapshot: AppProfileSnapshot = {
-      schemaVersion: '1.0.0',
-      exportedAt: new Date().toISOString(),
-      activeDeviceId,
-      devices,
-      mouseConfig,
-      keyboardConfig,
-      macros,
-      audioConfig,
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      const snapshot: AppProfileSnapshot = {
+        schemaVersion: '2.0.0',
+        exportedAt: new Date().toISOString(),
+        activeDeviceId,
+        devices,
+        mouseConfig,
+        keyboardConfig,
+        macros,
+        audioConfig,
+      };
+      void saveProfileSnapshot(snapshot);
+    }, 450);
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
     };
-    void saveProfileSnapshot(snapshot);
   }, [activeDeviceId, devices, mouseConfig, keyboardConfig, macros, audioConfig]);
 
   const mouseDevice =
     devices.find((d) => d.category === 'mouse' && d.id === activeDeviceId) ??
     devices.find((d) => d.category === 'mouse') ??
-    INITIAL_DEVICES[0];
+    null;
 
   const keyboardDevice =
     devices.find((d) => d.category === 'keyboard' && d.id === activeDeviceId) ??
     devices.find((d) => d.category === 'keyboard') ??
-    INITIAL_DEVICES[1];
+    null;
 
   const headsetDevice =
     devices.find((d) => d.category === 'headset' && d.id === activeDeviceId) ??
     devices.find((d) => d.category === 'headset') ??
-    INITIAL_DEVICES[2];
+    null;
 
   const handleSelectDevice = (device: PeripheralDevice) => {
     setActiveDeviceId(device.id);
@@ -137,70 +178,54 @@ export default function App() {
     else setActiveSection('audio');
   };
 
+  const handleRefreshDevices = async () => {
+    if (!isTauriRuntime()) {
+      showNotice('桌面便携版 EXE 会自动扫描本机 2.4G / 蓝牙 / USB 外设并读取真实电量');
+      return;
+    }
+    setScanning(true);
+    const found = await scanNativeWindowsDevices();
+    mergeScannedDevices(found);
+    setScanning(false);
+    showNotice(
+      found.length > 0
+        ? `已刷新 ${found.length} 台本机物理外设与实时电量`
+        : '未扫描到外接键鼠或蓝牙耳机（已过滤系统音频端点）'
+    );
+  };
+
   const handleMouseChange = (next: MouseConfig) => {
     setMouseConfig(next);
-    setDevices((prev) =>
-      prev.map((d) =>
-        d.id === mouseDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
-      )
-    );
-    void syncMouseHardware(next, mouseDevice);
+    if (mouseDevice) {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === mouseDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
+        )
+      );
+      syncMouseHardware(next, mouseDevice);
+    }
   };
 
   const handleKeyboardChange = (next: KeyboardConfig) => {
     setKeyboardConfig(next);
-    setDevices((prev) =>
-      prev.map((d) =>
-        d.id === keyboardDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
-      )
-    );
-    void syncKeyboardHardware(next, keyboardDevice);
+    if (keyboardDevice) {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === keyboardDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
+        )
+      );
+      syncKeyboardHardware(next, keyboardDevice);
+    }
   };
 
   const handleAudioChange = (next: AudioConfig) => {
     setAudioConfig(next);
-    void syncAudioHardware(next, headsetDevice);
-  };
-
-  const handleSwitchProtocol = (deviceId: string, protocol: ConnectionProtocol) => {
-    setDevices((prev) =>
-      prev.map((d) =>
-        d.id === deviceId
-          ? {
-              ...d,
-              activeProtocol: protocol,
-              connected: true,
-              charging: protocol === 'usb',
-              signalStrengthDbm: protocol === 'usb' ? null : -45,
-            }
-          : d
-      )
-    );
-    showNotice(`已切换通道至 ${protocol === '2.4g' ? '2.4G 无线' : protocol === 'bluetooth' ? '蓝牙' : 'USB 有线'}`);
-  };
-
-  const handleToggleConnect = (deviceId: string) => {
-    setDevices((prev) =>
-      prev.map((d) => (d.id === deviceId ? { ...d, connected: !d.connected } : d))
-    );
-  };
-
-  const handleChangeOnboardSlot = (deviceId: string, slot: number) => {
-    setDevices((prev) =>
-      prev.map((d) => (d.id === deviceId ? { ...d, activeSlot: slot } : d))
-    );
-    showNotice(`已切换至板载存储槽位 ${slot}`);
-  };
-
-  const handleAddDevice = (device: PeripheralDevice) => {
-    setDevices((prev) => [device, ...prev]);
-    setActiveDeviceId(device.id);
-    showNotice(`已接入外设：${device.name}`);
+    syncAudioHardware(next, headsetDevice);
   };
 
   const handleExportProfile = () => {
     const snapshot: AppProfileSnapshot = {
-      schemaVersion: '1.0.0',
+      schemaVersion: '2.0.0',
       exportedAt: new Date().toISOString(),
       activeDeviceId,
       devices,
@@ -233,10 +258,21 @@ export default function App() {
   };
 
   const handleWriteToHardware = () => {
-    void syncMouseHardware(mouseConfig, mouseDevice);
-    void syncKeyboardHardware(keyboardConfig, keyboardDevice);
-    void syncAudioHardware(audioConfig, headsetDevice);
-    showNotice('已将当前全部配置写入板载内存与便携目录');
+    syncMouseHardware(mouseConfig, mouseDevice);
+    syncKeyboardHardware(keyboardConfig, keyboardDevice);
+    syncAudioHardware(audioConfig, headsetDevice);
+    const snapshot: AppProfileSnapshot = {
+      schemaVersion: '2.0.0',
+      exportedAt: new Date().toISOString(),
+      activeDeviceId,
+      devices,
+      mouseConfig,
+      keyboardConfig,
+      macros,
+      audioConfig,
+    };
+    void saveProfileSnapshot(snapshot);
+    showNotice('已异步下发支持协议的硬件参数并写入便携目录');
   };
 
   return (
@@ -252,7 +288,6 @@ export default function App() {
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Clean Minimalist Top Workspace Bar */}
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-[#E5E9EE] bg-[#F6F7F9]/90 px-4 backdrop-blur-md sm:px-8">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -280,90 +315,86 @@ export default function App() {
             className="inline-flex items-center gap-1.5 rounded-lg bg-[#181C20] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#2C333B] transition-colors whitespace-nowrap shrink-0"
           >
             <Save className="h-3.5 w-3.5" />
-            <span>写入板载配置</span>
+            <span>保存并下发配置</span>
           </button>
         </header>
 
-        {/* Main Viewport with Smooth Compositor-Only Transitions */}
         <main className="mx-auto w-full max-w-[1220px] flex-1 px-4 py-6 sm:px-8 sm:py-8">
           <div key={activeSection} className="lumen-view-enter">
-              {activeSection === 'devices' && (
-                <DevicesView
-                  devices={devices}
-                  activeDeviceId={activeDeviceId}
-                  onSelectDeviceAndOpen={(dev, sec) => {
-                    setActiveDeviceId(dev.id);
-                    setActiveSection(sec);
-                  }}
-                  onSwitchProtocol={handleSwitchProtocol}
-                  onToggleConnect={handleToggleConnect}
-                  onChangeOnboardSlot={handleChangeOnboardSlot}
-                  onAddDevice={handleAddDevice}
-                  onExportProfile={handleExportProfile}
-                  onImportProfile={handleImportProfile}
-                />
-              )}
+            {activeSection === 'devices' && (
+              <DevicesView
+                devices={devices}
+                activeDeviceId={activeDeviceId}
+                scanning={scanning}
+                onSelectDeviceAndOpen={(dev, sec) => {
+                  setActiveDeviceId(dev.id);
+                  setActiveSection(sec);
+                }}
+                onRefreshDevices={handleRefreshDevices}
+                onMergeScannedDevices={mergeScannedDevices}
+                onExportProfile={handleExportProfile}
+                onImportProfile={handleImportProfile}
+              />
+            )}
 
-              {activeSection === 'mouse' && (
-                <MouseView
-                  device={mouseDevice}
-                  config={mouseConfig}
-                  macros={macros}
-                  onChange={handleMouseChange}
-                  onReset={() => {
-                    handleMouseChange(INITIAL_MOUSE_CONFIG);
-                    showNotice('鼠标参数已恢复出厂默认');
-                  }}
-                />
-              )}
+            {activeSection === 'mouse' && (
+              <MouseView
+                device={mouseDevice}
+                config={mouseConfig}
+                macros={macros}
+                onChange={handleMouseChange}
+                onReset={() => {
+                  handleMouseChange(DEFAULT_MOUSE_CONFIG);
+                  showNotice('鼠标参数已恢复出厂默认');
+                }}
+              />
+            )}
 
-              {activeSection === 'keyboard' && (
-                <KeyboardView
-                  device={keyboardDevice}
-                  config={keyboardConfig}
-                  macros={macros}
-                  onChange={handleKeyboardChange}
-                  onReset={() => {
-                    handleKeyboardChange(INITIAL_KEYBOARD_CONFIG);
-                    showNotice('键盘键位与磁轴参数已恢复默认');
-                  }}
-                />
-              )}
+            {activeSection === 'keyboard' && (
+              <KeyboardView
+                device={keyboardDevice}
+                config={keyboardConfig}
+                macros={macros}
+                onChange={handleKeyboardChange}
+                onReset={() => {
+                  handleKeyboardChange(DEFAULT_KEYBOARD_CONFIG);
+                  showNotice('键盘键位与轴体参数已恢复默认');
+                }}
+              />
+            )}
 
-              {activeSection === 'macros' && (
-                <MacroStudioView
-                  macros={macros}
-                  onChangeMacros={setMacros}
-                  onSimulateRun={(m) => {
-                    void triggerMacroHardware(m);
-                    showNotice(`正在模拟执行宏：${m.name}`);
-                  }}
-                />
-              )}
+            {activeSection === 'macros' && (
+              <MacroStudioView
+                macros={macros}
+                onChangeMacros={setMacros}
+                onSimulateRun={(m) => {
+                  void triggerMacroHardware(m);
+                  showNotice(`正在模拟执行宏：${m.name}`);
+                }}
+              />
+            )}
 
-              {activeSection === 'audio' && (
-                <AudioStudioView
-                  device={headsetDevice}
-                  config={audioConfig}
-                  onChange={handleAudioChange}
-                  onReset={() => {
-                    handleAudioChange({
-                      ...INITIAL_AUDIO_CONFIG,
-                      activePresetId: 'flat',
-                      bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                      preampDb: 0,
-                    });
-                    showNotice('均衡器曲线已重置为纯净原声');
-                  }}
-                />
-              )}
-
-              {activeSection === 'docs' && <DocsHubView />}
+            {activeSection === 'audio' && (
+              <AudioStudioView
+                device={headsetDevice}
+                config={audioConfig}
+                onChange={handleAudioChange}
+                onReset={() => {
+                  handleAudioChange({
+                    ...DEFAULT_AUDIO_CONFIG,
+                    activePresetId: 'flat',
+                    bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    preampDb: 0,
+                  });
+                  showNotice('均衡器曲线已重置为纯净原声');
+                }}
+                onExportApoNotice={(msg) => showNotice(msg)}
+              />
+            )}
           </div>
         </main>
       </div>
 
-      {/* Subtle Accessible Toast Feedback */}
       {notice && (
         <div
           role="status"

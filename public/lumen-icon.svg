@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="lumenBg" x1="24" y1="16" x2="232" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#317D79" />
+      <stop offset="100%" stop-color="#174946" />
+    </linearGradient>
+    <linearGradient id="lumenStroke" x1="60" y1="54" x2="196" y2="202" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#D7ECEA" />
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#lumenBg)" />
+  <rect x="16" y="16" width="224" height="224" rx="52" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="2" />
+  <!-- Architectural L-Chassis -->
+  <path
+    d="M74 64C74 58.4772 78.4772 54 84 54H98C103.523 54 108 58.4772 108 64V156H178C183.523 156 188 160.477 188 166V180C188 185.523 183.523 190 178 190H84C78.4772 190 74 185.523 74 180V64Z"
+    fill="url(#lumenStroke)"
+  />
+  <!-- Multi-protocol Signal Arcs (2.4G / Bluetooth / USB) -->
+  <path
+    d="M132 102C146.359 102 158 113.641 158 128"
+    stroke="#FFFFFF"
+    stroke-width="14"
+    stroke-linecap="round"
+    stroke-opacity="0.95"
+  />
+  <path
+    d="M132 70C164.033 70 190 95.9675 190 128"
+    stroke="#A7DCD8"
+    stroke-width="12"
+    stroke-linecap="round"
+    stroke-opacity="0.88"
+  />
+  <!-- Precision Core Dot -->
+  <circle cx="134" cy="128" r="10" fill="#FFFFFF" />
+</svg>

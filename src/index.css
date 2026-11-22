@@ -115,11 +115,11 @@ input[type="range"].lumen-slider::-moz-range-thumb {
 @keyframes lumen-view-enter {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
@@ -135,7 +135,7 @@ input[type="range"].lumen-slider::-moz-range-thumb {
 }
 
 .lumen-view-enter {
-  animation: lumen-view-enter 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: lumen-view-enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .lumen-toast-enter {

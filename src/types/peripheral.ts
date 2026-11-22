@@ -1,7 +1,14 @@
 export type ConnectionProtocol = '2.4g' | 'bluetooth' | 'usb';
 export type ProtocolFilter = 'all' | ConnectionProtocol;
 export type DeviceCategory = 'mouse' | 'keyboard' | 'headset';
-export type NavSection = 'devices' | 'mouse' | 'keyboard' | 'macros' | 'audio' | 'docs';
+export type NavSection = 'devices' | 'mouse' | 'keyboard' | 'macros' | 'audio';
+
+export type BatterySource = 'windows-bt' | 'hid-vendor' | 'wired' | 'unavailable';
+export type ProtocolSupportLevel =
+  | 'native-full'
+  | 'native-battery-experimental-tuning'
+  | 'native-battery-readonly'
+  | 'system-apo';
 
 export interface PeripheralDevice {
   id: string;
@@ -11,11 +18,15 @@ export interface PeripheralDevice {
   activeProtocol: ConnectionProtocol;
   supportedProtocols: ConnectionProtocol[];
   connected: boolean;
-  batteryPercent: number | null; // null when wired-only
+  batteryPercent: number | null; // null when wired or hardware does not report battery
+  batterySource: BatterySource;
   charging: boolean;
   firmwareVersion: string;
-  vendorId: string; // e.g. "0x3554"
-  productId: string; // e.g. "0xF51A"
+  vendorId: string; // e.g. "0x1D57"
+  productId: string; // e.g. "0xFA65"
+  vendorControlPath?: string | null;
+  protocolSupport: ProtocolSupportLevel;
+  protocolNote: string;
   pollingRateHz: number;
   signalStrengthDbm: number | null;
   imageUrl: string;
@@ -146,7 +157,7 @@ export interface AudioConfig {
 }
 
 export interface AppProfileSnapshot {
-  schemaVersion: '1.0.0';
+  schemaVersion: '2.0.0';
   exportedAt: string;
   activeDeviceId: string;
   devices: PeripheralDevice[];

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plus, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { Download, Plus, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { BUILTIN_EQ_PRESETS, EQ_LABELS } from '../data/seedDevices';
 import type {
   AudioConfig,
@@ -12,14 +12,16 @@ import {
   calculateSpatialNodePosition,
   clampEqGain,
   generateEqCurvePath,
+  generateEqualizerApoConfig,
 } from '../utils/deviceEngine';
-import { AudioPreviewEngine } from '../services/deviceBridge';
+import { AudioPreviewEngine, downloadTextFile } from '../services/deviceBridge';
 
 interface AudioStudioViewProps {
-  device: PeripheralDevice;
+  device: PeripheralDevice | null;
   config: AudioConfig;
   onChange: (next: AudioConfig) => void;
   onReset: () => void;
+  onExportApoNotice?: (message: string) => void;
 }
 
 const ROOM_MODES: { id: RoomAcousticsMode; label: string }[] = [
@@ -28,7 +30,13 @@ const ROOM_MODES: { id: RoomAcousticsMode; label: string }[] = [
   { id: 'hall', label: '音乐厅' },
 ];
 
-export function AudioStudioView({ device, config, onChange, onReset }: AudioStudioViewProps) {
+export function AudioStudioView({
+  device,
+  config,
+  onChange,
+  onReset,
+  onExportApoNotice,
+}: AudioStudioViewProps) {
   const [auditioning, setAuditioning] = useState(false);
   const [customPresetName, setCustomPresetName] = useState('');
   const [presetError, setPresetError] = useState<string | null>(null);
@@ -49,6 +57,16 @@ export function AudioStudioView({ device, config, onChange, onReset }: AudioStud
         ch.id === selectedChannel.id ? { ...ch, gainDb: clampEqGain(gainDb) } : ch
       ),
     });
+  };
+
+  const handleExportEqualizerApo = () => {
+    const content = generateEqualizerApoConfig(
+      config.bands,
+      config.preampDb,
+      device?.name ?? 'Windows Audio Device'
+    );
+    downloadTextFile('LumenHID-EQ.txt', content, 'text/plain;charset=utf-8');
+    onExportApoNotice?.('已导出 EqualizerAPO 全局 10 段 EQ 配置文件 LumenHID-EQ.txt');
   };
 
   useEffect(() => {
@@ -129,7 +147,15 @@ export function AudioStudioView({ device, config, onChange, onReset }: AudioStud
             耳机均衡器与空间声场
           </h1>
           <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#586370]">
-            <span>{device.name}</span>
+            <span>{device ? device.name : '未连接外置耳机（支持实时试听与 EqualizerAPO 导出）'}</span>
+            {device?.batteryPercent !== null && device?.batteryPercent !== undefined && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono font-medium tabular-nums text-[#2B6B68]">
+                  电量 {device.batteryPercent}%
+                </span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span>{activePreset ? activePreset.name : '自定义曲线'}</span>
             <span aria-hidden="true">·</span>
@@ -138,6 +164,15 @@ export function AudioStudioView({ device, config, onChange, onReset }: AudioStud
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportEqualizerApo}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#C4DCD9] bg-[#EBF3F2] px-3.5 py-2 text-xs font-medium text-[#1D4E4C] hover:bg-[#DCEBE9] transition-colors whitespace-nowrap"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>导出 EqualizerAPO (.txt)</span>
+          </button>
+
           <button
             type="button"
             onClick={toggleAudition}
@@ -161,6 +196,12 @@ export function AudioStudioView({ device, config, onChange, onReset }: AudioStud
           </button>
         </div>
       </div>
+
+      {device?.protocolNote && (
+        <div className="rounded-xl border border-[#DCE5E4] bg-[#F4F8F7] px-4 py-2.5 text-xs leading-relaxed text-[#1D4E4C]">
+          {device.protocolNote}
+        </div>
+      )}
 
       {/* 10-Band EQ Section */}
       <section className="rounded-2xl border border-[#E5E9EE] bg-white p-6 space-y-5">

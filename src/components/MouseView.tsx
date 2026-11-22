@@ -12,7 +12,7 @@ import {
 } from '../utils/deviceEngine';
 
 interface MouseViewProps {
-  device: PeripheralDevice;
+  device: PeripheralDevice | null;
   config: MouseConfig;
   macros: MacroDefinition[];
   onChange: (next: MouseConfig) => void;
@@ -99,9 +99,23 @@ export function MouseView({ device, config, macros, onChange, onReset }: MouseVi
             鼠标调校与按键映射
           </h1>
           <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#586370]">
-            <span>{device.name}</span>
-            <span aria-hidden="true">·</span>
-            <span>{device.model}</span>
+            <span>{device ? device.name : '未连接实体鼠标（本地离线预设编辑）'}</span>
+            {device && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {device.vendorId}:{device.productId}
+                </span>
+                {device.batteryPercent !== null && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono font-medium tabular-nums text-[#2B6B68]">
+                      电量 {device.batteryPercent}%
+                    </span>
+                  </>
+                )}
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">
               当前 {activeStage.dpiX} DPI / {config.pollingRateHz} Hz
@@ -118,6 +132,12 @@ export function MouseView({ device, config, macros, onChange, onReset }: MouseVi
           <span>恢复默认参数</span>
         </button>
       </div>
+
+      {device?.protocolNote && (
+        <div className="rounded-xl border border-[#DCE5E4] bg-[#F4F8F7] px-4 py-2.5 text-xs leading-relaxed text-[#1D4E4C]">
+          {device.protocolNote}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
         {/* Left: Interactive Mouse Blueprint & Key Binding */}

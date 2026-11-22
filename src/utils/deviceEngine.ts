@@ -1,10 +1,13 @@
+import { EQ_FREQUENCIES } from '../data/seedDevices';
 import type {
   AppProfileSnapshot,
   AudioPreset,
+  DeviceCategory,
   DpiStage,
   MacroStep,
   PeripheralDevice,
   ProtocolFilter,
+  ProtocolSupportLevel,
   SpatialChannel,
 } from '../types/peripheral';
 
@@ -13,6 +16,195 @@ export const DPI_MAX = 30000;
 export const DPI_STEP = 50;
 export const EQ_MIN_DB = -12;
 export const EQ_MAX_DB = 12;
+
+const SYSTEM_ENDPOINT_BLOCKLIST = [
+  'realtek',
+  'high definition audio',
+  '高清音频',
+  '扬声器',
+  '麦克风阵列',
+  '立体声混音',
+  'hdmi',
+  'displayport',
+  'nvidia',
+  'amd high definition',
+  'intel(r) display',
+  'intel smart sound',
+  'conexant',
+  'nahimic',
+  'dolby',
+  'voicemeeter',
+  'vb-audio',
+  'virtual audio',
+  'steam streaming',
+  'touchpad',
+  'precision touchpad',
+  'elan',
+  'synaptics',
+  'alps',
+  'i2c hid',
+  'acpi',
+  'system control',
+  'root hub',
+  'usb hub',
+  'bluetooth adapter',
+  'bluetooth radio',
+  'intel(r) wireless bluetooth',
+  'microsoft bluetooth enumerator',
+  'avrcp transport',
+  'hands-free ag',
+  'hid-compliant system',
+  'virtual',
+  'vmware',
+  'hyper-v',
+  'parsec',
+  'vmulti',
+];
+
+const EXTERNAL_PERIPHERAL_ALLOWLIST = [
+  'inphic',
+  '英菲克',
+  'hecate',
+  'edifier',
+  '漫步者',
+  'g5 max',
+  'g5max',
+  'k98pro',
+  'k98 pro',
+  'leobog',
+  '凌豹',
+  'sinowealth',
+  'logitech',
+  'razer',
+  'steelseries',
+  'hyperx',
+  'corsair',
+  'keychron',
+  'wooting',
+  'vgn',
+  'atk',
+];
+
+/**
+ * Excludes motherboard/GPU audio endpoints (e.g. "Realtek 高清音频输出 (扬声器/耳麦)"),
+ * laptop touchpads, hubs, and virtual drivers while preserving real external peripherals.
+ */
+export function isSystemEndpointName(name: string, manufacturer = ''): boolean {
+  const n = name.toLowerCase();
+  const combined = `${n} ${manufacturer.toLowerCase()}`;
+
+  if (n.includes('realtek') || n.includes('高清音频')) {
+    return true;
+  }
+  if (EXTERNAL_PERIPHERAL_ALLOWLIST.some((kw) => combined.includes(kw))) {
+    return false;
+  }
+  return SYSTEM_ENDPOINT_BLOCKLIST.some((kw) => combined.includes(kw));
+}
+
+export interface KnownPeripheralClassification {
+  displayName: string;
+  manufacturer: string;
+  category: DeviceCategory;
+  protocolSupport: ProtocolSupportLevel;
+  protocolNote: string;
+  maxPollingHz: number;
+}
+
+/**
+ * Mirrors Rust vendor_protocols.rs fingerprint mapping for browser WebHID & unit tests.
+ */
+export function classifyKnownPeripheral(
+  vendorId: string,
+  productId: string,
+  rawName: string,
+  fallbackCategory: DeviceCategory = 'mouse'
+): KnownPeripheralClassification {
+  const vid = vendorId.toUpperCase();
+  const pid = productId.toUpperCase();
+  const lower = rawName.toLowerCase();
+
+  if ((vid === '0X1D57' && pid === '0XFA65') || (lower.includes('inphic') && lower.includes('kp'))) {
+    return {
+      displayName: 'Inphic KP 8K',
+      manufacturer: '英菲克 Inphic',
+      category: 'mouse',
+      protocolSupport: 'native-battery-experimental-tuning',
+      protocolNote:
+        '已识别英菲克 KP 8K (0x1D57:0xFA65)；已锁定 0xFF00 私有通道读取电量，DPI/回报率采用 Beken 私有报文试验下发。',
+      maxPollingHz: 8000,
+    };
+  }
+
+  if (
+    (vid === '0X258A' && pid === '0X0040') ||
+    lower.includes('k98pro') ||
+    lower.includes('k98 pro') ||
+    lower.includes('leobog')
+  ) {
+    return {
+      displayName: '凌豹 K98PRO 5.0',
+      manufacturer: '凌豹 / Sinowealth',
+      category: 'keyboard',
+      protocolSupport: 'native-battery-readonly',
+      protocolNote:
+        '已识别凌豹 K98PRO 5.0 (中颖 0x258A:0x0040)；电量通过 Windows 蓝牙属性或只读 HID 实时获取。为防止误写 Flash 分区导致键盘锁死，且蓝牙 HOGP 通道不支持写入，当前保持只读安全模式。',
+      maxPollingHz: 1000,
+    };
+  }
+
+  if (
+    lower.includes('g5 max') ||
+    lower.includes('g5max') ||
+    (lower.includes('hecate') && lower.includes('g5')) ||
+    (lower.includes('edifier') && lower.includes('g5'))
+  ) {
+    return {
+      displayName: '漫步者 HECATE G5 Max',
+      manufacturer: '漫步者 Edifier HECATE',
+      category: 'headset',
+      protocolSupport: 'system-apo',
+      protocolNote:
+        '已识别漫步者 HECATE G5 Max；蓝牙模式支持原生实时电量显示。其板载 DSP EQ 属闭源加密协议，请使用「导出 EqualizerAPO 配置」在 Windows 全局无损生效 10 段 EQ。',
+      maxPollingHz: 1000,
+    };
+  }
+
+  return {
+    displayName: rawName.trim() || `HID 外设 ${pid}`,
+    manufacturer: 'Standard HID',
+    category: fallbackCategory,
+    protocolSupport: 'native-battery-readonly',
+    protocolNote: '已通过标准 HID 识别；当前启用安全只读监测与本地便携配置文件保存。',
+    maxPollingHz: 1000,
+  };
+}
+
+/**
+ * Generates an industry-standard EqualizerAPO GraphicEQ / Filter configuration file
+ * so Windows users (e.g. 漫步者 HECATE G5 Max) can apply exact 10-band EQ globally.
+ */
+export function generateEqualizerApoConfig(
+  bands: number[],
+  preampDb: number,
+  deviceName = 'Default Audio Output'
+): string {
+  const safePreamp = Number(Math.min(6, Math.max(-6, preampDb)).toFixed(1));
+  const pairs = EQ_FREQUENCIES.map((freq, idx) => {
+    const db = clampEqGain(bands[idx] ?? 0);
+    return `${freq} ${db.toFixed(1)}`;
+  }).join('; ');
+
+  const lines = [
+    '# LumenHID — EqualizerAPO 10-Band Configuration',
+    `# Target Device: ${deviceName}`,
+    '# Usage: Place this file in C:\\Program Files\\EqualizerAPO\\config\\ and add "Include: LumenHID-EQ.txt" in config.txt',
+    `Preamp: ${safePreamp} dB`,
+    `GraphicEQ: ${pairs}`,
+    '',
+  ];
+  return lines.join('\n');
+}
 
 export function filterDevices(
   devices: PeripheralDevice[],
@@ -89,11 +281,6 @@ export function removeDpiStage(
 
 /**
  * Generates a 16-byte HID Feature Report preview (standardized LumenHID protocol v1)
- * Byte 0: Report ID (0x08)
- * Byte 1: Command ID
- * Byte 2: Payload length
- * Bytes 3..14: Payload bytes
- * Byte 15: XOR Checksum of bytes 0..14
  */
 export function buildHidFeatureReport(commandId: number, payload: number[]): {
   bytes: number[];
@@ -252,8 +439,7 @@ export function calculateSpatialNodePosition(
   maxRadius: number
 ): { x: number; y: number } {
   const widthFactor = 0.55 + (Math.min(100, Math.max(0, soundstageWidth)) / 100) * 0.45;
-  const gainNormalized = (clampEqGain(channel.gainDb) + EQ_MAX_DB) / (EQ_MAX_DB * 2); // 0..1
-  // Higher gain brings perceived acoustic source closer to listener
+  const gainNormalized = (clampEqGain(channel.gainDb) + EQ_MAX_DB) / (EQ_MAX_DB * 2);
   const distanceFactor = (1.0 - gainNormalized * 0.34) * widthFactor;
   const radius = maxRadius * distanceFactor;
   const rad = ((channel.angleDeg - 90) * Math.PI) / 180;
@@ -275,17 +461,29 @@ export function parseAndValidateProfile(rawJson: string): {
   error: string;
 } {
   try {
-    const parsed = JSON.parse(rawJson) as Partial<AppProfileSnapshot>;
+    const parsed = JSON.parse(rawJson) as Partial<AppProfileSnapshot> & { schemaVersion?: string };
     if (!parsed || typeof parsed !== 'object') {
       return { ok: false, error: '配置文件格式无效，需要 JSON 对象' };
     }
-    if (parsed.schemaVersion !== '1.0.0') {
+    if (parsed.schemaVersion !== '2.0.0' && parsed.schemaVersion !== '1.0.0') {
       return { ok: false, error: '不支持的配置文件版本号' };
     }
-    if (!Array.isArray(parsed.devices) || !parsed.mouseConfig || !parsed.keyboardConfig || !parsed.audioConfig || !Array.isArray(parsed.macros)) {
+    if (
+      !Array.isArray(parsed.devices) ||
+      !parsed.mouseConfig ||
+      !parsed.keyboardConfig ||
+      !parsed.audioConfig ||
+      !Array.isArray(parsed.macros)
+    ) {
       return { ok: false, error: '配置文件缺少必要的外设或音频字段' };
     }
-    return { ok: true, data: parsed as AppProfileSnapshot };
+    return {
+      ok: true,
+      data: {
+        ...(parsed as AppProfileSnapshot),
+        schemaVersion: '2.0.0',
+      },
+    };
   } catch {
     return { ok: false, error: 'JSON 解析失败，请检查文件内容是否完整' };
   }

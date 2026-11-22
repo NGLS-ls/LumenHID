@@ -2,13 +2,16 @@ import { EQ_FREQUENCIES } from '../data/seedDevices';
 import type {
   AppProfileSnapshot,
   AudioConfig,
+  BatterySource,
   KeyboardConfig,
   MacroDefinition,
   MouseConfig,
   PeripheralDevice,
+  ProtocolSupportLevel,
 } from '../types/peripheral';
+import { classifyKnownPeripheral, isSystemEndpointName } from '../utils/deviceEngine';
 
-const STORAGE_KEY = 'lumenhid.portable.profile.v1';
+const STORAGE_KEY = 'lumenhid.portable.profile.v2';
 
 declare global {
   interface Window {
@@ -45,7 +48,7 @@ export function loadSavedProfile(): AppProfileSnapshot | null {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as AppProfileSnapshot;
-    if (parsed && parsed.schemaVersion === '1.0.0' && Array.isArray(parsed.devices)) {
+    if (parsed && parsed.schemaVersion === '2.0.0' && Array.isArray(parsed.devices)) {
       return parsed;
     }
     return null;
@@ -55,66 +58,97 @@ export function loadSavedProfile(): AppProfileSnapshot | null {
 }
 
 export async function saveProfileSnapshot(snapshot: AppProfileSnapshot): Promise<void> {
+  const serialized = JSON.stringify(snapshot);
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    window.localStorage.setItem(STORAGE_KEY, serialized);
   } catch {
     // Ignore storage quota issues in restricted iframes
   }
   if (isTauriRuntime()) {
     await invokeNativeCommand('save_portable_profile', {
-      payload: JSON.stringify(snapshot),
+      payload: serialized,
     });
   }
 }
 
-export async function syncMouseHardware(
+// Debounce timers prevent saturating HID I/O or disk writes while dragging sliders
+let mouseSyncTimer: number | null = null;
+let keyboardSyncTimer: number | null = null;
+let audioSyncTimer: number | null = null;
+
+export function syncMouseHardware(
   config: MouseConfig,
-  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
-): Promise<void> {
-  if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_mouse_config', {
-      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId' | 'vendorControlPath'> | null
+): void {
+  if (!isTauriRuntime() || !device) return;
+  if (mouseSyncTimer !== null) window.clearTimeout(mouseSyncTimer);
+  mouseSyncTimer = window.setTimeout(() => {
+    void invokeNativeCommand('apply_mouse_config', {
+      config: {
+        ...config,
+        vendorId: device.vendorId,
+        productId: device.productId,
+        vendorControlPath: device.vendorControlPath ?? null,
+      },
     });
-  }
+  }, 120);
 }
 
-export async function syncKeyboardHardware(
+export function syncKeyboardHardware(
   config: KeyboardConfig,
-  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
-): Promise<void> {
-  if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_keyboard_config', {
-      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'> | null
+): void {
+  if (!isTauriRuntime() || !device) return;
+  if (keyboardSyncTimer !== null) window.clearTimeout(keyboardSyncTimer);
+  keyboardSyncTimer = window.setTimeout(() => {
+    void invokeNativeCommand('apply_keyboard_config', {
+      config: { ...config, vendorId: device.vendorId, productId: device.productId },
     });
-  }
+  }, 120);
 }
 
-export async function syncAudioHardware(
+export function syncAudioHardware(
   config: AudioConfig,
-  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
-): Promise<void> {
-  if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_audio_eq', {
-      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'> | null
+): void {
+  if (!isTauriRuntime() || !device) return;
+  if (audioSyncTimer !== null) window.clearTimeout(audioSyncTimer);
+  audioSyncTimer = window.setTimeout(() => {
+    void invokeNativeCommand('apply_audio_eq', {
+      config: { ...config, vendorId: device.vendorId, productId: device.productId },
     });
-  }
+  }, 120);
 }
 
 export async function triggerMacroHardware(macro: MacroDefinition): Promise<void> {
   if (isTauriRuntime()) {
-    await invokeNativeCommand('execute_macro', { macro });
+    await invokeNativeCommand('execute_macro', { macroDef: macro });
   }
 }
 
-interface NativeDiscoveredHid {
+interface NativeDiscoveredPeripheral {
   vendor_id: string;
   product_id: string;
   product_name: string;
   manufacturer: string;
   interface_number: number;
   device_path: string;
+  vendor_control_path: string | null;
   protocol: '2.4g' | 'bluetooth' | 'usb';
   category: 'mouse' | 'keyboard' | 'headset';
+  battery_percent: number | null;
+  battery_source: BatterySource;
+  protocol_support: ProtocolSupportLevel;
+  protocol_note: string;
+  max_polling_hz: number;
+}
+
+export interface NativeBatterySnapshot {
+  vendor_id: string;
+  product_id: string;
+  product_name: string;
+  battery_percent: number | null;
+  battery_source: BatterySource;
 }
 
 const IMAGE_BY_CATEGORY = {
@@ -124,88 +158,161 @@ const IMAGE_BY_CATEGORY = {
 } as const;
 
 /**
- * Enumerates real Windows native HID ports (USB / 2.4G / Bluetooth) via Tauri Rust hidapi.
+ * Enumerates real physical Windows peripherals (HID + Bluetooth PnP battery)
+ * with system endpoints (Realtek audio, touchpads, ACPI, hubs) stripped out.
  */
 export async function scanNativeWindowsDevices(): Promise<PeripheralDevice[]> {
   if (!isTauriRuntime()) return [];
-  const rawList = await invokeNativeCommand<NativeDiscoveredHid[]>('scan_devices');
+  const rawList = await invokeNativeCommand<NativeDiscoveredPeripheral[]>('scan_devices');
   if (!rawList || rawList.length === 0) return [];
-  return rawList.slice(0, 12).map((d, idx) => {
-    const category =
-      d.category === 'keyboard' || d.category === 'headset' ? d.category : 'mouse';
-    const protocol =
-      d.protocol === '2.4g' || d.protocol === 'bluetooth' ? d.protocol : 'usb';
-    return {
-      id: `winhid-${d.vendor_id}-${d.product_id}-${idx}`,
-      name: d.product_name,
-      model: `${d.manufacturer} · Windows 原生 HID`,
-      category,
-      activeProtocol: protocol,
-      supportedProtocols: [protocol],
-      connected: true,
-      batteryPercent: protocol === 'usb' ? null : 85,
-      charging: protocol === 'usb',
-      firmwareVersion: 'WIN-HID',
-      vendorId: d.vendor_id,
-      productId: d.product_id,
-      pollingRateHz: 1000,
-      signalStrengthDbm: protocol === 'usb' ? null : -48,
-      imageUrl: IMAGE_BY_CATEGORY[category],
-      onboardSlots: 1,
-      activeSlot: 1,
-      sleepMinutes: 10,
-    };
-  });
+
+  return rawList
+    .filter((d) => !isSystemEndpointName(d.product_name, d.manufacturer))
+    .slice(0, 16)
+    .map((d) => {
+      const category =
+        d.category === 'keyboard' || d.category === 'headset' ? d.category : 'mouse';
+      const protocol =
+        d.protocol === '2.4g' || d.protocol === 'bluetooth' ? d.protocol : 'usb';
+      const stableId = `hw-${d.vendor_id}-${d.product_id}-${d.product_name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+      return {
+        id: stableId,
+        name: d.product_name,
+        model: `${d.manufacturer} · Windows 原生端口`,
+        category,
+        activeProtocol: protocol,
+        supportedProtocols: [protocol],
+        connected: true,
+        batteryPercent: d.battery_percent,
+        batterySource: d.battery_source,
+        charging: d.battery_source === 'wired',
+        firmwareVersion: d.protocol === 'bluetooth' ? 'BT-PNP' : 'WIN-HID',
+        vendorId: d.vendor_id,
+        productId: d.product_id,
+        vendorControlPath: d.vendor_control_path,
+        protocolSupport: d.protocol_support,
+        protocolNote: d.protocol_note,
+        pollingRateHz: d.max_polling_hz || 1000,
+        signalStrengthDbm: null,
+        imageUrl: IMAGE_BY_CATEGORY[category],
+        onboardSlots: 1,
+        activeSlot: 1,
+        sleepMinutes: 10,
+      };
+    });
+}
+
+export async function refreshNativeBatteries(): Promise<NativeBatterySnapshot[]> {
+  if (!isTauriRuntime()) return [];
+  const res = await invokeNativeCommand<NativeBatterySnapshot[]>('refresh_device_battery');
+  return res ?? [];
 }
 
 /**
- * Attempts Windows native HID scan in Tauri desktop runtime, or WebHID in compatible browsers.
+ * Scans real physical peripherals:
+ * - On Windows EXE (Tauri): scans native HID + Bluetooth PnP asynchronously.
+ * - On Web browser: invokes WebHID `requestDevice` and filters out system endpoints.
  */
-export async function requestWebHidDevice(): Promise<PeripheralDevice | null> {
+export async function scanRealDevices(): Promise<{
+  devices: PeripheralDevice[];
+  message: string;
+}> {
   if (isTauriRuntime()) {
-    const nativeDevices = await scanNativeWindowsDevices();
-    return nativeDevices[0] ?? null;
+    const found = await scanNativeWindowsDevices();
+    if (found.length === 0) {
+      return {
+        devices: [],
+        message: '未扫描到外部键鼠或蓝牙耳机（已自动屏蔽 Realtek 声卡与系统内置节点）。请确认外设已通电连接。',
+      };
+    }
+    return {
+      devices: found,
+      message: `已识别 ${found.length} 台本机物理外设（已自动剔除系统音频与虚拟节点）。`,
+    };
   }
-  if (!supportsWebHid()) return null;
+
+  if (!supportsWebHid()) {
+    return {
+      devices: [],
+      message: '当前浏览器不支持 WebHID。请下载并运行 Windows 桌面便携版 LumenHID.exe 以读取本机 2.4G / 蓝牙 / USB 外设与真实电量。',
+    };
+  }
+
   try {
     const navHid = (navigator as unknown as {
-      hid: { requestDevice: (opts: { filters: unknown[] }) => Promise<Array<{ productName?: string; vendorId: number; productId: number }>> };
+      hid: {
+        requestDevice: (opts: {
+          filters: unknown[];
+        }) => Promise<Array<{ productName?: string; vendorId: number; productId: number }>>;
+      };
     }).hid;
     const picked = await navHid.requestDevice({ filters: [] });
-    if (!picked || picked.length === 0) return null;
-    const d = picked[0];
-    const vid = `0x${d.vendorId.toString(16).toUpperCase().padStart(4, '0')}`;
-    const pid = `0x${d.productId.toString(16).toUpperCase().padStart(4, '0')}`;
-    const name = d.productName?.trim() || `HID 外设 ${pid}`;
-    const lower = name.toLowerCase();
-    const category =
-      lower.includes('head') || lower.includes('audio') || lower.includes('mic')
-        ? 'headset'
-        : lower.includes('key') || lower.includes('kbd')
-          ? 'keyboard'
-          : 'mouse';
+    if (!picked || picked.length === 0) {
+      return {
+        devices: [],
+        message: '已取消浏览器 HID 设备授权。',
+      };
+    }
+
+    const mapped: PeripheralDevice[] = [];
+    for (const d of picked) {
+      const vid = `0x${d.vendorId.toString(16).toUpperCase().padStart(4, '0')}`;
+      const pid = `0x${d.productId.toString(16).toUpperCase().padStart(4, '0')}`;
+      const rawName = d.productName?.trim() || `HID 外设 ${pid}`;
+      if (isSystemEndpointName(rawName)) {
+        continue;
+      }
+      const lower = rawName.toLowerCase();
+      const fallbackCat =
+        lower.includes('head') || lower.includes('audio') || lower.includes('hecate') || lower.includes('g5')
+          ? 'headset'
+          : lower.includes('key') || lower.includes('kbd') || lower.includes('k98')
+            ? 'keyboard'
+            : 'mouse';
+      const info = classifyKnownPeripheral(vid, pid, rawName, fallbackCat);
+      mapped.push({
+        id: `webhid-${vid}-${pid}`,
+        name: info.displayName,
+        model: `${info.manufacturer} · WebHID 直连`,
+        category: info.category,
+        activeProtocol: 'usb',
+        supportedProtocols: ['usb'],
+        connected: true,
+        batteryPercent: null,
+        batterySource: 'unavailable',
+        charging: false,
+        firmwareVersion: 'WebHID',
+        vendorId: vid,
+        productId: pid,
+        vendorControlPath: null,
+        protocolSupport: info.protocolSupport,
+        protocolNote: info.protocolNote,
+        pollingRateHz: info.maxPollingHz,
+        signalStrengthDbm: null,
+        imageUrl: IMAGE_BY_CATEGORY[info.category],
+        onboardSlots: 1,
+        activeSlot: 1,
+        sleepMinutes: 10,
+      });
+    }
+
+    if (mapped.length === 0) {
+      return {
+        devices: [],
+        message: '所选节点属于系统内置设备，已被自动过滤。请选择外接键鼠或耳机设备。',
+      };
+    }
+
     return {
-      id: `webhid-${vid}-${pid}-${Date.now()}`,
-      name,
-      model: 'WebHID 标准直连外设',
-      category,
-      activeProtocol: 'usb',
-      supportedProtocols: ['usb'],
-      connected: true,
-      batteryPercent: null,
-      charging: false,
-      firmwareVersion: 'HID-1.0',
-      vendorId: vid,
-      productId: pid,
-      pollingRateHz: 1000,
-      signalStrengthDbm: null,
-      imageUrl: IMAGE_BY_CATEGORY[category],
-      onboardSlots: 1,
-      activeSlot: 1,
-      sleepMinutes: 10,
+      devices: mapped,
+      message: `已通过 WebHID 接入 ${mapped.length} 台物理外设。`,
     };
   } catch {
-    return null;
+    return {
+      devices: [],
+      message: '浏览器当前沙箱环境限制了 WebHID 授权窗口；请在 Windows 便携版 LumenHID.exe 中扫描本机硬件。',
+    };
   }
 }
 
@@ -223,7 +330,7 @@ export function downloadTextFile(filename: string, content: string, mimeType = '
 
 /**
  * Real Web Audio API 10-band BiquadFilter audition synthesizer so users can hear
- * EQ curve and stereo/spatial adjustments live in-browser.
+ * EQ curve and stereo/spatial adjustments live.
  */
 export class AudioPreviewEngine {
   private ctx: AudioContext | null = null;
@@ -238,7 +345,9 @@ export class AudioPreviewEngine {
   public start(bands: number[], preampDb: number, balance: number): boolean {
     if (this.running) return true;
     try {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return false;
       const ctx = new AudioCtx();
       this.ctx = ctx;
@@ -249,7 +358,8 @@ export class AudioPreviewEngine {
 
       const filters = EQ_FREQUENCIES.map((freq, idx) => {
         const filter = ctx.createBiquadFilter();
-        filter.type = idx === 0 ? 'lowshelf' : idx === EQ_FREQUENCIES.length - 1 ? 'highshelf' : 'peaking';
+        filter.type =
+          idx === 0 ? 'lowshelf' : idx === EQ_FREQUENCIES.length - 1 ? 'highshelf' : 'peaking';
         filter.frequency.value = freq;
         filter.Q.value = 1.4;
         filter.gain.value = bands[idx] ?? 0;
@@ -265,7 +375,6 @@ export class AudioPreviewEngine {
       master.gain.value = 0.08;
       this.masterGain = master;
 
-      // Chain: source -> preamp -> filters[0..9] -> panner -> master -> destination
       let prev: AudioNode = preamp;
       for (const f of filters) {
         prev.connect(f);
@@ -275,19 +384,24 @@ export class AudioPreviewEngine {
       panner.connect(master);
       master.connect(ctx.destination);
 
-      // Gentle warm ambient harmonic chord + filtered soft pink noise for full-spectrum EQ audition
       const bufferSize = ctx.sampleRate * 2;
       const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
       const output = noiseBuffer.getChannelData(0);
-      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      let b0 = 0,
+        b1 = 0,
+        b2 = 0,
+        b3 = 0,
+        b4 = 0,
+        b5 = 0,
+        b6 = 0;
       for (let i = 0; i < bufferSize; i++) {
         const white = Math.random() * 2 - 1;
         b0 = 0.99886 * b0 + white * 0.0555179;
         b1 = 0.99332 * b1 + white * 0.0750759;
-        b2 = 0.96900 * b2 + white * 0.1538520;
-        b3 = 0.86650 * b3 + white * 0.3104856;
-        b4 = 0.55000 * b4 + white * 0.5329522;
-        b5 = -0.7616 * b5 - white * 0.0168980;
+        b2 = 0.969 * b2 + white * 0.153852;
+        b3 = 0.8665 * b3 + white * 0.3104856;
+        b4 = 0.55 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.016898;
         output[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.035;
         b6 = white * 0.115926;
       }
@@ -299,7 +413,6 @@ export class AudioPreviewEngine {
       noise.start();
       this.sourceNode = noise;
 
-      // Subtle pure harmonic triad (C3, G3, E4)
       const freqs = [130.81, 196.0, 329.63];
       this.oscNodes = freqs.map((f) => {
         const osc = ctx.createOscillator();

@@ -12,7 +12,7 @@ import type {
 import { validateActuation } from '../utils/deviceEngine';
 
 interface KeyboardViewProps {
-  device: PeripheralDevice;
+  device: PeripheralDevice | null;
   config: KeyboardConfig;
   macros: MacroDefinition[];
   onChange: (next: KeyboardConfig) => void;
@@ -88,13 +88,27 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
             键盘布局与磁轴调校
           </h1>
           <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#586370]">
-            <span>{device.name}</span>
+            <span>{device ? device.name : '未连接实体键盘（本地离线键位编辑）'}</span>
+            {device && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {device.vendorId}:{device.productId}
+                </span>
+                {device.batteryPercent !== null && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono font-medium tabular-nums text-[#2B6B68]">
+                      电量 {device.batteryPercent}%
+                    </span>
+                  </>
+                )}
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">触发行程 {config.globalActuationMm.toFixed(2)} mm</span>
             <span aria-hidden="true">·</span>
             <span>{config.rapidTriggerEnabled ? `RT ${config.rapidTriggerSensitivityMm.toFixed(2)} mm` : 'RT 关闭'}</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums">{config.pollingRateHz} Hz</span>
           </p>
         </div>
 
@@ -107,6 +121,12 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
           <span>恢复默认键位</span>
         </button>
       </div>
+
+      {device?.protocolNote && (
+        <div className="rounded-xl border border-[#DCE5E4] bg-[#F4F8F7] px-4 py-2.5 text-xs leading-relaxed text-[#1D4E4C]">
+          {device.protocolNote}
+        </div>
+      )}
 
       {/* 75% Interactive Keymap Surface */}
       <section className="rounded-2xl border border-[#E5E9EE] bg-white p-5 sm:p-6">
