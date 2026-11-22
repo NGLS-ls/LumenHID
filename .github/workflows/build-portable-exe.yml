@@ -1,0 +1,117 @@
+name: Build LumenHID Portable Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quality-gate:
+    name: Typecheck, Unit Tests & Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript static check
+        run: npm run lint
+
+      - name: Run unit tests (node:test via tsx)
+        run: npx tsx --test src/utils/deviceEngine.test.ts
+
+      - name: Build production web bundle
+        run: npm run build
+
+  build-windows-portable:
+    name: Compile Portable Windows x64 EXE (Tauri v2)
+    needs: quality-gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build standalone portable EXE (no installer)
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Assemble portable distribution package
+        shell: pwsh
+        run: |
+          $outDir = "release-portable/LumenHID-Portable"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/lumen-hid.exe" "$outDir/LumenHID.exe"
+          Set-Content -Path "$outDir/portable.flag" -Value "LUMENHID_PORTABLE_MODE=1"
+          @"
+          LumenHID Portable Edition (Windows x64)
+          =======================================
+          1. 双击 LumenHID.exe 即可直接运行，无需安装、不写注册表。
+          2. 首次运行后会在当前目录自动创建 LumenHID.data\ 保存外设配置与宏数据。
+          3. 运行依赖 Windows 10/11 系统内置的 Microsoft Edge WebView2 Runtime。
+          "@ | Set-Content -Encoding UTF8 -Path "$outDir/README-Portable.txt"
+
+          $hash = (Get-FileHash "$outDir/LumenHID.exe" -Algorithm SHA256).Hash
+          "$hash  LumenHID.exe" | Set-Content -Path "release-portable/SHA256SUMS.txt"
+
+          Compress-Archive -Path "$outDir/*" -DestinationPath "release-portable/LumenHID-Portable-win-x64.zip" -Force
+
+      - name: Upload Portable EXE Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumenHID-Portable-win-x64
+          path: |
+            release-portable/LumenHID-Portable/LumenHID.exe
+            release-portable/LumenHID-Portable-win-x64.zip
+            release-portable/SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Publish GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-portable/LumenHID-Portable/LumenHID.exe
+            release-portable/LumenHID-Portable-win-x64.zip
+            release-portable/SHA256SUMS.txt
+          generate_release_notes: true

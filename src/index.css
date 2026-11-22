@@ -1,0 +1,153 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-canvas: #F6F7F9;
+  --color-surface: #FFFFFF;
+  --color-surface-subtle: #F0F3F6;
+  --color-border-hairline: #E5E9EE;
+  --color-border-strong: #D3DAE2;
+  --color-ink-primary: #181C20;
+  --color-ink-secondary: #586370;
+  --color-ink-muted: #84909D;
+  --color-accent: #2B6B68;
+  --color-accent-hover: #215452;
+  --color-accent-tint: #EBF3F2;
+  --color-accent-border: #C4DCD9;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color: var(--color-ink-primary);
+    background-color: var(--color-canvas);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Minimalist custom range inputs */
+input[type="range"].lumen-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].lumen-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: #DCE2E8;
+}
+
+input[type="range"].lumen-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #FFFFFF;
+  border: 2px solid #2B6B68;
+  box-shadow: 0 1px 3px rgba(24, 28, 32, 0.14);
+  margin-top: -6px;
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease;
+}
+
+input[type="range"].lumen-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.1);
+  border-color: #215452;
+}
+
+input[type="range"].lumen-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: #DCE2E8;
+}
+
+input[type="range"].lumen-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #FFFFFF;
+  border: 2px solid #2B6B68;
+  box-shadow: 0 1px 3px rgba(24, 28, 32, 0.14);
+}
+
+/* Quiet minimal scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D5DCE3;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #B5C0CB;
+}
+
+@keyframes lumen-view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes lumen-toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.lumen-view-enter {
+  animation: lumen-view-enter 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.lumen-toast-enter {
+  animation: lumen-toast-enter 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "LumenHID",
+  "description": "极简全协议外设驱动中心：统一管理 2.4G、蓝牙、USB 键鼠宏定义、按键重映射与耳机 EQ 声场调校，内置 Tauri 免安装 EXE 工程与全流程标准化研发文档。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
