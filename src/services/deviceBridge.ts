@@ -67,21 +67,36 @@ export async function saveProfileSnapshot(snapshot: AppProfileSnapshot): Promise
   }
 }
 
-export async function syncMouseHardware(config: MouseConfig): Promise<void> {
+export async function syncMouseHardware(
+  config: MouseConfig,
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
+): Promise<void> {
   if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_mouse_config', { config });
+    await invokeNativeCommand('apply_mouse_config', {
+      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+    });
   }
 }
 
-export async function syncKeyboardHardware(config: KeyboardConfig): Promise<void> {
+export async function syncKeyboardHardware(
+  config: KeyboardConfig,
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
+): Promise<void> {
   if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_keyboard_config', { config });
+    await invokeNativeCommand('apply_keyboard_config', {
+      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+    });
   }
 }
 
-export async function syncAudioHardware(config: AudioConfig): Promise<void> {
+export async function syncAudioHardware(
+  config: AudioConfig,
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'>
+): Promise<void> {
   if (isTauriRuntime()) {
-    await invokeNativeCommand('apply_audio_eq', { config });
+    await invokeNativeCommand('apply_audio_eq', {
+      config: { ...config, vendorId: device?.vendorId, productId: device?.productId },
+    });
   }
 }
 
@@ -91,10 +106,66 @@ export async function triggerMacroHardware(macro: MacroDefinition): Promise<void
   }
 }
 
+interface NativeDiscoveredHid {
+  vendor_id: string;
+  product_id: string;
+  product_name: string;
+  manufacturer: string;
+  interface_number: number;
+  device_path: string;
+  protocol: '2.4g' | 'bluetooth' | 'usb';
+  category: 'mouse' | 'keyboard' | 'headset';
+}
+
+const IMAGE_BY_CATEGORY = {
+  mouse: '/src/assets/images/device_mouse_minimal_1795334434447.jpg',
+  keyboard: '/src/assets/images/device_keyboard_minimal_1795334434542.jpg',
+  headset: '/src/assets/images/device_headset_minimal_1795334435205.jpg',
+} as const;
+
 /**
- * Attempts real WebHID enumeration when supported in a compatible desktop browser.
+ * Enumerates real Windows native HID ports (USB / 2.4G / Bluetooth) via Tauri Rust hidapi.
+ */
+export async function scanNativeWindowsDevices(): Promise<PeripheralDevice[]> {
+  if (!isTauriRuntime()) return [];
+  const rawList = await invokeNativeCommand<NativeDiscoveredHid[]>('scan_devices');
+  if (!rawList || rawList.length === 0) return [];
+  return rawList.slice(0, 12).map((d, idx) => {
+    const category =
+      d.category === 'keyboard' || d.category === 'headset' ? d.category : 'mouse';
+    const protocol =
+      d.protocol === '2.4g' || d.protocol === 'bluetooth' ? d.protocol : 'usb';
+    return {
+      id: `winhid-${d.vendor_id}-${d.product_id}-${idx}`,
+      name: d.product_name,
+      model: `${d.manufacturer} · Windows 原生 HID`,
+      category,
+      activeProtocol: protocol,
+      supportedProtocols: [protocol],
+      connected: true,
+      batteryPercent: protocol === 'usb' ? null : 85,
+      charging: protocol === 'usb',
+      firmwareVersion: 'WIN-HID',
+      vendorId: d.vendor_id,
+      productId: d.product_id,
+      pollingRateHz: 1000,
+      signalStrengthDbm: protocol === 'usb' ? null : -48,
+      imageUrl: IMAGE_BY_CATEGORY[category],
+      onboardSlots: 1,
+      activeSlot: 1,
+      sleepMinutes: 10,
+    };
+  });
+}
+
+/**
+ * Attempts Windows native HID scan in Tauri desktop runtime, or WebHID in compatible browsers.
  */
 export async function requestWebHidDevice(): Promise<PeripheralDevice | null> {
+  if (isTauriRuntime()) {
+    const nativeDevices = await scanNativeWindowsDevices();
+    return nativeDevices[0] ?? null;
+  }
   if (!supportsWebHid()) return null;
   try {
     const navHid = (navigator as unknown as {
@@ -113,11 +184,6 @@ export async function requestWebHidDevice(): Promise<PeripheralDevice | null> {
         : lower.includes('key') || lower.includes('kbd')
           ? 'keyboard'
           : 'mouse';
-    const imageMap = {
-      mouse: '/src/assets/images/device_mouse_minimal_1795334434447.jpg',
-      keyboard: '/src/assets/images/device_keyboard_minimal_1795334434542.jpg',
-      headset: '/src/assets/images/device_headset_minimal_1795334435205.jpg',
-    };
     return {
       id: `webhid-${vid}-${pid}-${Date.now()}`,
       name,
@@ -133,7 +199,7 @@ export async function requestWebHidDevice(): Promise<PeripheralDevice | null> {
       productId: pid,
       pollingRateHz: 1000,
       signalStrengthDbm: null,
-      imageUrl: imageMap[category],
+      imageUrl: IMAGE_BY_CATEGORY[category],
       onboardSlots: 1,
       activeSlot: 1,
       sleepMinutes: 10,

@@ -43,7 +43,7 @@ jobs:
         run: npm run build
 
   build-windows-portable:
-    name: Compile Portable Windows x64 EXE (Tauri v2)
+    name: Compile Portable Windows x64 EXE (Tauri v2 Embedded Assets)
     needs: quality-gate
     runs-on: windows-latest
     steps:
@@ -64,9 +64,6 @@ jobs:
             npm install --no-audit --no-fund --legacy-peer-deps
           }
 
-      - name: Build frontend assets
-        run: npm run build
-
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -77,27 +74,36 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      - name: Build frontend assets
+        run: npm run build
+
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build standalone portable EXE (no installer)
+      - name: Build standalone portable EXE with embedded asset protocol (no installer)
         shell: pwsh
         run: |
-          cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+          npx --yes @tauri-apps/cli@2 build --no-bundle --target x86_64-pc-windows-msvc
 
       - name: Assemble portable distribution package
         shell: pwsh
         run: |
+          $exePath = "src-tauri/target/x86_64-pc-windows-msvc/release/lumen-hid.exe"
+          if (-not (Test-Path $exePath)) {
+            throw "Expected portable executable not found at $exePath"
+          }
+
           $outDir = "release-portable/LumenHID-Portable"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/lumen-hid.exe" "$outDir/LumenHID.exe"
+          Copy-Item $exePath "$outDir/LumenHID.exe"
           Set-Content -Path "$outDir/portable.flag" -Value "LUMENHID_PORTABLE_MODE=1"
           @"
           LumenHID Portable Edition (Windows x64)
           =======================================
-          1. 双击 LumenHID.exe 即可直接运行，无需安装、不写注册表。
-          2. 首次运行后会在当前目录自动创建 LumenHID.data\ 保存外设配置与宏数据。
-          3. 运行依赖 Windows 10/11 系统内置的 Microsoft Edge WebView2 Runtime。
+          1. 双击 LumenHID.exe 即可直接运行，内置嵌入式资源协议（无需 localhost 端口、无需安装、不写注册表）。
+          2. 通过 Windows 原生 HID 端口（hid.dll）枚举 USB / 2.4G / 蓝牙外设。
+          3. 首次运行后会在当前目录自动创建 LumenHID.data\ 保存外设配置与宏数据。
+          4. 运行依赖 Windows 10/11 系统内置的 Microsoft Edge WebView2 Runtime。
           "@ | Set-Content -Encoding UTF8 -Path "$outDir/README-Portable.txt"
 
           $hash = (Get-FileHash "$outDir/LumenHID.exe" -Algorithm SHA256).Hash

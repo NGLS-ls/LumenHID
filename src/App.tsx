@@ -27,8 +27,10 @@ import type {
 import { parseAndValidateProfile, serializeProfile } from './utils/deviceEngine';
 import {
   downloadTextFile,
+  isTauriRuntime,
   loadSavedProfile,
   saveProfileSnapshot,
+  scanNativeWindowsDevices,
   syncAudioHardware,
   syncKeyboardHardware,
   syncMouseHardware,
@@ -81,6 +83,23 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  // Auto-discover real Windows native HID ports when running inside portable Tauri EXE
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    void scanNativeWindowsDevices().then((nativeDevs) => {
+      if (cancelled || nativeDevs.length === 0) return;
+      setDevices((prev) => {
+        const existingKeys = new Set(prev.map((d) => `${d.vendorId}:${d.productId}`));
+        const fresh = nativeDevs.filter((d) => !existingKeys.has(`${d.vendorId}:${d.productId}`));
+        return fresh.length > 0 ? [...fresh, ...prev] : prev;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Auto-persist portable snapshot cleanly whenever state changes
   useEffect(() => {
     const snapshot: AppProfileSnapshot = {
@@ -125,7 +144,7 @@ export default function App() {
         d.id === mouseDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
       )
     );
-    void syncMouseHardware(next);
+    void syncMouseHardware(next, mouseDevice);
   };
 
   const handleKeyboardChange = (next: KeyboardConfig) => {
@@ -135,12 +154,12 @@ export default function App() {
         d.id === keyboardDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
       )
     );
-    void syncKeyboardHardware(next);
+    void syncKeyboardHardware(next, keyboardDevice);
   };
 
   const handleAudioChange = (next: AudioConfig) => {
     setAudioConfig(next);
-    void syncAudioHardware(next);
+    void syncAudioHardware(next, headsetDevice);
   };
 
   const handleSwitchProtocol = (deviceId: string, protocol: ConnectionProtocol) => {
@@ -214,9 +233,9 @@ export default function App() {
   };
 
   const handleWriteToHardware = () => {
-    void syncMouseHardware(mouseConfig);
-    void syncKeyboardHardware(keyboardConfig);
-    void syncAudioHardware(audioConfig);
+    void syncMouseHardware(mouseConfig, mouseDevice);
+    void syncKeyboardHardware(keyboardConfig, keyboardDevice);
+    void syncAudioHardware(audioConfig, headsetDevice);
     showNotice('已将当前全部配置写入板载内存与便携目录');
   };
 
