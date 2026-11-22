@@ -28,9 +28,9 @@ jobs:
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --no-audit --no-fund
           else
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           fi
 
       - name: TypeScript static check
@@ -59,9 +59,9 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path package-lock.json) {
-            npm ci
+            npm ci --no-audit --no-fund
           } else {
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           }
 
       - name: Build frontend assets
