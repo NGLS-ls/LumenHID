@@ -95,20 +95,40 @@ let audioSyncTimer: number | null = null;
 
 export function syncMouseHardware(
   config: MouseConfig,
-  device?: Pick<PeripheralDevice, 'vendorId' | 'productId' | 'vendorControlPath'> | null
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId' | 'vendorControlPath'> | null,
+  onResult?: (res: HidDispatchResult) => void
 ): void {
   if (!isTauriRuntime() || !device) return;
   if (mouseSyncTimer !== null) window.clearTimeout(mouseSyncTimer);
   mouseSyncTimer = window.setTimeout(() => {
-    void invokeNativeCommand('apply_mouse_config', {
+    void invokeNativeCommand<HidDispatchResult>('apply_mouse_config', {
       config: {
         ...config,
         vendorId: device.vendorId,
         productId: device.productId,
         vendorControlPath: device.vendorControlPath ?? null,
       },
+    }).then((res) => {
+      if (res && onResult) onResult(res);
     });
   }, 120);
+}
+
+export interface MouseRollbackResult {
+  mouseConfig: MouseConfig;
+  dispatch: HidDispatchResult;
+  source: string;
+  detail: string;
+}
+
+export async function rollbackMouseConfig(
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId' | 'vendorControlPath'> | null
+): Promise<{ ok: true; data: MouseRollbackResult } | { ok: false; error: string }> {
+  return invokeNativeResult<MouseRollbackResult>('rollback_mouse_config', {
+    vendorId: device?.vendorId ?? null,
+    productId: device?.productId ?? null,
+    vendorControlPath: device?.vendorControlPath ?? null,
+  });
 }
 
 export interface HidDispatchResult {

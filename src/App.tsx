@@ -33,6 +33,7 @@ import {
   refreshNativeBatteries,
   rollbackAudioConfig,
   rollbackKeyboardConfig,
+  rollbackMouseConfig,
   saveProfileSnapshot,
   scanNativeWindowsDevices,
   setKeyboardEngineEnabled,
@@ -294,6 +295,27 @@ export default function App() {
     }
   };
 
+  const handleRollbackMouse = () => {
+    void rollbackMouseConfig(mouseDevice).then((res) => {
+      if (!res.ok) {
+        showNotice(res.error);
+        return;
+      }
+      const restored = res.data.mouseConfig;
+      if (restored) {
+        setMouseConfig(restored);
+        if (mouseDevice) {
+          setDevices((prev) =>
+            prev.map((d) =>
+              d.id === mouseDevice.id ? { ...d, pollingRateHz: restored.pollingRateHz } : d
+            )
+          );
+        }
+      }
+      showNotice(res.data.detail);
+    });
+  };
+
   const handleKeyboardChange = (next: KeyboardConfig) => {
     setKeyboardConfig(next);
     if (keyboardDevice) {
@@ -419,7 +441,11 @@ export default function App() {
   };
 
   const handleWriteToHardware = () => {
-    syncMouseHardware(mouseConfig, mouseDevice);
+    syncMouseHardware(mouseConfig, mouseDevice, (res) => {
+      if (activeSection === 'mouse') {
+        showNotice(res.detail);
+      }
+    });
     syncKeyboardHardware(keyboardConfig, keyboardDevice);
     syncAudioHardware(audioConfig, headsetDevice, (res) => {
       if (activeSection === 'audio') {
@@ -508,6 +534,7 @@ export default function App() {
                 config={mouseConfig}
                 macros={macros}
                 onChange={handleMouseChange}
+                onRollback={handleRollbackMouse}
                 onReset={() => {
                   handleMouseChange(DEFAULT_MOUSE_CONFIG);
                   showNotice('鼠标参数已恢复出厂默认');

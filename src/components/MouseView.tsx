@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, History, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import type { KeyBinding, MacroDefinition, MouseConfig, PeripheralDevice } from '../types/peripheral';
 import {
   addDpiStage,
@@ -17,6 +17,60 @@ interface MouseViewProps {
   macros: MacroDefinition[];
   onChange: (next: MouseConfig) => void;
   onReset: () => void;
+  onRollback?: () => void;
+}
+
+function buildInphicDpiReport04Preview(config: MouseConfig): { hex: string; sumHex: string } {
+  const stages = config.dpiStages.slice(0, 8);
+  const count = Math.max(1, stages.length);
+  const activeIdx = Math.min(config.activeStageIndex, count - 1);
+  const cmd = new Uint8Array(56);
+  const ms = config.motionSync ? 1 : 0;
+  cmd[0] = 0x04;
+  cmd[1] = 0x38;
+  cmd[2] = 0x01;
+  cmd[3] = ms;
+  cmd[4] = config.liftOffDistanceMm <= 1.0 ? 1 : 2;
+  cmd[5] = ((1 << count) - 1) & 0xff;
+  cmd[6] = ms;
+  cmd[7] = 1;
+
+  for (let i = 0; i < 8; i++) {
+    const st = stages[i];
+    const rawDpi = Math.max(50, Math.min(26000, st?.dpiX ?? 800));
+    const step = Math.max(0, Math.min(519, Math.floor(rawDpi / 50) - 1));
+    cmd[8 + i] = step & 0xff;
+    cmd[16 + i] = (step >> 8) & 0xff;
+
+    const hexColor = (st?.color ?? '#2B6B68').replace('#', '');
+    const valid = /^[0-9a-fA-F]{6}$/.test(hexColor);
+    cmd[25 + i * 3] = valid ? parseInt(hexColor.slice(0, 2), 16) : 0x2b;
+    cmd[26 + i * 3] = valid ? parseInt(hexColor.slice(2, 4), 16) : 0x6b;
+    cmd[27 + i * 3] = valid ? parseInt(hexColor.slice(4, 6), 16) : 0x68;
+  }
+
+  cmd[24] = activeIdx + 1;
+  cmd[49] = 0x01;
+  let innerSum = 0;
+  for (let i = 3; i < 50; i++) innerSum = (innerSum + cmd[i]) & 0xffff;
+  cmd[50] = (innerSum >> 8) & 0xff;
+  cmd[51] = innerSum & 0xff;
+
+  const pkt = new Uint8Array(64);
+  pkt[0] = 0x04;
+  pkt[1] = cmd.length + 5;
+  pkt[2] = 0x00;
+  pkt.set(cmd, 3);
+  let outerSum = 0;
+  for (let i = 0; i < 3 + cmd.length; i++) outerSum = (outerSum + pkt[i]) & 0xffff;
+  pkt[3 + cmd.length] = (outerSum >> 8) & 0xff;
+  pkt[3 + cmd.length + 1] = outerSum & 0xff;
+
+  const hex = Array.from(pkt)
+    .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+    .join(' ');
+  const sumHex = `0x${outerSum.toString(16).toUpperCase().padStart(4, '0')}`;
+  return { hex, sumHex };
 }
 
 const POLLING_RATES: MouseConfig['pollingRateHz'][] = [125, 250, 500, 1000, 2000, 4000, 8000];
@@ -55,11 +109,15 @@ const QUICK_BINDINGS: { group: string; items: KeyBinding[] }[] = [
   },
 ];
 
-export function MouseView({ device, config, macros, onChange, onReset }: MouseViewProps) {
+export function MouseView({ device, config, macros, onChange, onReset, onRollback }: MouseViewProps) {
   const [selectedButtonId, setSelectedButtonId] = useState<string>('sideForward');
   const [showHidHex, setShowHidHex] = useState(false);
 
   const activeStage = config.dpiStages[config.activeStageIndex] ?? config.dpiStages[0];
+  const isInphicKp8k =
+    device?.vendorId?.toUpperCase() === '0X1D57' &&
+    device?.productId?.toUpperCase() === '0XFA65';
+  const inphicPreview = isInphicKp8k ? buildInphicDpiReport04Preview(config) : null;
   const selectedButtonMeta =
     MOUSE_BUTTON_META.find((b) => b.id === selectedButtonId) ?? MOUSE_BUTTON_META[0];
   const currentBinding = config.buttonBindings[selectedButtonId] ?? {
@@ -123,14 +181,27 @@ export function MouseView({ device, config, macros, onChange, onReset }: MouseVi
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onReset}
-          className="inline-flex items-center gap-1.5 self-start rounded-lg border border-[#E5E9EE] bg-white px-3.5 py-2 text-xs font-medium text-[#586370] hover:bg-[#F0F3F6] hover:text-[#181C20] transition-colors whitespace-nowrap"
-        >
-          <RotateCcw className="h-3.5 w-3.5" />
-          <span>恢复默认参数</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          {onRollback && (
+            <button
+              type="button"
+              onClick={onRollback}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFDD] bg-white px-3.5 py-2 text-xs font-medium text-[#1D4E4C] hover:bg-[#EBF3F2] transition-colors whitespace-nowrap"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>回滚上一版鼠标配置</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onReset}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#E5E9EE] bg-white px-3.5 py-2 text-xs font-medium text-[#586370] hover:bg-[#F0F3F6] hover:text-[#181C20] transition-colors whitespace-nowrap"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            <span>恢复默认参数</span>
+          </button>
+        </div>
       </div>
 
       {device?.protocolNote && (
@@ -603,16 +674,31 @@ export function MouseView({ device, config, macros, onChange, onReset }: MouseVi
                 onClick={() => setShowHidHex((v) => !v)}
                 className="flex w-full items-center justify-between text-xs font-medium text-[#586370] hover:text-[#181C20]"
               >
-                <span>HID Feature Report 16 字节下发帧预览</span>
+                <span>
+                  {inphicPreview
+                    ? 'Inphic Report ID 0x04 · 64 字节真帧预览'
+                    : 'HID Feature Report 16 字节下发帧预览'}
+                </span>
                 {showHidHex ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
               </button>
               {showHidHex && (
                 <div className="mt-3 rounded-xl bg-[#F4F6F8] px-4 py-3 font-mono text-xs text-[#181C20] overflow-x-auto">
-                  <div className="text-[11px] text-[#586370] mb-1">
-                    CMD 0x21 · Report ID 0x08 · XOR 校验 0x
-                    {hidPacket.checksum.toString(16).toUpperCase().padStart(2, '0')}
-                  </div>
-                  <div className="tabular-nums tracking-wider">{hidPacket.hex}</div>
+                  {inphicPreview ? (
+                    <>
+                      <div className="text-[11px] text-[#586370] mb-1">
+                        Inphic ms_3 CMD 0x04 (LEN 0x38) · Report ID 0x04 · Sum16 校验 {inphicPreview.sumHex}
+                      </div>
+                      <div className="tabular-nums tracking-wider break-all">{inphicPreview.hex}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-[11px] text-[#586370] mb-1">
+                        CMD 0x21 · Report ID 0x08 · XOR 校验 0x
+                        {hidPacket.checksum.toString(16).toUpperCase().padStart(2, '0')}
+                      </div>
+                      <div className="tabular-nums tracking-wider">{hidPacket.hex}</div>
+                    </>
+                  )}
                 </div>
               )}
             </div>

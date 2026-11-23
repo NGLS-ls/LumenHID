@@ -20,10 +20,15 @@ use vendor_protocols::{aggregate_real_peripherals, DiscoveredPeripheral};
 use win_battery::query_windows_bluetooth_devices;
 
 static ACTIVE_KEYBOARD_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+static ACTIVE_MOUSE_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 static ACTIVE_AUDIO_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 
 fn active_kbd_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
     ACTIVE_KEYBOARD_CFG.get_or_init(|| Mutex::new(None))
+}
+
+fn active_mouse_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
+    ACTIVE_MOUSE_CFG.get_or_init(|| Mutex::new(None))
 }
 
 fn active_audio_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
@@ -92,24 +97,116 @@ fn dispatch_mouse_blocking(config: serde_json::Value) -> HidDispatchResult {
         .and_then(|v| v.as_str())
         .and_then(parse_hex_id)
         .unwrap_or(0);
+    let control_path = config
+        .get("vendorControlPath")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let payload = polling.to_be_bytes();
-    let report = hid_protocol::build_feature_report(hid_protocol::CMD_SET_POLLING_RATE, &payload);
+    let fallback_report =
+        hid_protocol::build_feature_report(hid_protocol::CMD_SET_POLLING_RATE, &payload);
+
+    let is_inphic = vid == protocols::inphic_in10::VID_INPHIC
+        && pid == protocols::inphic_in10::PID_KP8K_DONGLE;
+    let preview_bytes = if is_inphic {
+        protocols::inphic_in10::build_dpi_frame_from_config(&config)
+            .map(|f| f.to_vec())
+            .unwrap_or_else(|_| fallback_report.to_vec())
+    } else {
+        fallback_report.to_vec()
+    };
 
     if vid != 0 && pid != 0 {
         if let Err(reason) = HardwareSafetyGuard::check_write_allowed(vid, pid, "mouse_config") {
             return HidDispatchResult {
                 dispatched_to_hardware: false,
-                report_bytes: report.to_vec(),
+                report_bytes: preview_bytes,
                 detail: reason,
             };
         }
     }
 
+    if is_inphic {
+        let Some(cpath) = control_path else {
+            return HidDispatchResult {
+                dispatched_to_hardware: false,
+                report_bytes: preview_bytes,
+                detail: "未检测到 Inphic MI_02&COL04 写通道，仅保存在本地配置".to_string(),
+            };
+        };
+
+        let cached = telemetry_daemon::get_cached_inphic_telemetry();
+        if let Err(reason) = protocols::inphic_in10::validate_inphic_write_preconditions(
+            vid,
+            pid,
+            cpath,
+            cached.model_id,
+        ) {
+            return HidDispatchResult {
+                dispatched_to_hardware: false,
+                report_bytes: preview_bytes,
+                detail: reason,
+            };
+        }
+
+        if let Ok(dir) = portable_data_dir() {
+            if let Ok(mut guard) = active_mouse_cfg_lock().lock() {
+                match guard.as_ref() {
+                    None => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "inphic_0x1d57_0xfa65",
+                            "mouse",
+                            "initial_baseline",
+                            config.clone(),
+                        );
+                    }
+                    Some(prev) if prev != &config => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "inphic_0x1d57_0xfa65",
+                            "mouse",
+                            "pre_write",
+                            prev.clone(),
+                        );
+                    }
+                    _ => {}
+                }
+                *guard = Some(config.clone());
+            }
+        }
+
+        let api = match HidApi::new() {
+            Ok(a) => a,
+            Err(e) => {
+                return HidDispatchResult {
+                    dispatched_to_hardware: false,
+                    report_bytes: preview_bytes,
+                    detail: format!("Windows 原生 HID 初始化失败: {e}"),
+                };
+            }
+        };
+
+        return match protocols::inphic_in10::apply_inphic_in10_config(&api, cpath, &config) {
+            Ok(bytes) => HidDispatchResult {
+                dispatched_to_hardware: true,
+                report_bytes: bytes,
+                detail: "已通过 Inphic 64B HID (0x04) 下发 DPI / 回报率 / LOD / 去抖并完成双阶段 ACK 校验"
+                    .to_string(),
+            },
+            Err(err) => HidDispatchResult {
+                dispatched_to_hardware: false,
+                report_bytes: preview_bytes,
+                detail: err,
+            },
+        };
+    }
+
     HidDispatchResult {
         dispatched_to_hardware: false,
-        report_bytes: report.to_vec(),
-        detail: "已保存鼠标调校参数至便携配置目录（安全只读遥测阶段）".to_string(),
+        report_bytes: preview_bytes,
+        detail: "已保存鼠标调校参数至便携配置目录（当前设备处于安全只读模式）".to_string(),
     }
 }
 
@@ -224,6 +321,69 @@ async fn apply_mouse_config(config: serde_json::Value) -> Result<HidDispatchResu
     tauri::async_runtime::spawn_blocking(move || dispatch_mouse_blocking(config))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn rollback_mouse_config(
+    vendor_id: Option<String>,
+    product_id: Option<String>,
+    vendor_control_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if safety::is_readonly_mode() {
+            return Err("全局只读安全模式已开启，已拦截鼠标配置回滚写入".to_string());
+        }
+
+        let dir = portable_data_dir()?;
+        let current = active_mouse_cfg_lock().lock().ok().and_then(|g| g.clone());
+        let backups = safety::list_backups(&dir, Some("inphic_0x1d57_0xfa65"));
+        let target = backups
+            .iter()
+            .find(|b| current.as_ref().map(|c| c != &b.payload).unwrap_or(true))
+            .or_else(|| backups.first())
+            .cloned()
+            .ok_or_else(|| "暂无可回滚的 Inphic 鼠标配置历史快照".to_string())?;
+
+        let mut restored = target.payload.clone();
+        if let Some(obj) = restored.as_object_mut() {
+            if obj.get("vendorId").is_none() {
+                if let Some(v) = vendor_id {
+                    obj.insert("vendorId".to_string(), serde_json::Value::String(v));
+                }
+            }
+            if obj.get("productId").is_none() {
+                if let Some(p) = product_id {
+                    obj.insert("productId".to_string(), serde_json::Value::String(p));
+                }
+            }
+            if obj.get("vendorControlPath").and_then(|v| v.as_str()).is_none() {
+                if let Some(cp) = vendor_control_path {
+                    obj.insert(
+                        "vendorControlPath".to_string(),
+                        serde_json::Value::String(cp),
+                    );
+                }
+            }
+        }
+
+        if let Ok(mut guard) = active_mouse_cfg_lock().lock() {
+            *guard = Some(restored.clone());
+        }
+
+        let dispatch = dispatch_mouse_blocking(restored.clone());
+        Ok(serde_json::json!({
+            "mouseConfig": restored,
+            "dispatch": dispatch,
+            "source": target.source,
+            "detail": if dispatch.dispatched_to_hardware {
+                "已从原子快照回滚 Inphic 鼠标参数并完成双 ACK 校验"
+            } else {
+                dispatch.detail.as_str()
+            }
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -556,6 +716,7 @@ pub fn run() {
             scan_devices,
             refresh_device_battery,
             apply_mouse_config,
+            rollback_mouse_config,
             apply_keyboard_config,
             sync_macros_to_engine,
             set_keyboard_engine_enabled,
