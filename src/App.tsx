@@ -23,12 +23,15 @@ import type {
 } from './types/peripheral';
 import { parseAndValidateProfile, serializeProfile } from './utils/deviceEngine';
 import {
+  applyHeadsetLed,
   downloadTextFile,
   emergencyResetKeyboardEngine,
   getKeyboardEngineStatus,
+  getThxStatus,
   isTauriRuntime,
   loadSavedProfile,
   refreshNativeBatteries,
+  rollbackAudioConfig,
   rollbackKeyboardConfig,
   saveProfileSnapshot,
   scanNativeWindowsDevices,
@@ -40,6 +43,7 @@ import {
   triggerMacroHardware,
   type KeyboardEngineStatus,
   type TelemetryEventPayload,
+  type ThxStatus,
 } from './services/deviceBridge';
 
 const SECTION_BREADCRUMBS: Record<NavSection, string> = {
@@ -80,6 +84,7 @@ export default function App() {
   const [keyboardEngineStatus, setKeyboardEngineStatus] = useState<KeyboardEngineStatus | null>(
     null
   );
+  const [thxStatus, setThxStatus] = useState<ThxStatus | null>(null);
   const saveTimerRef = useRef<number | null>(null);
 
   const showNotice = useCallback((msg: string) => {
@@ -115,11 +120,18 @@ export default function App() {
     };
   }, [mergeScannedDevices]);
 
-  // Sync macros & initial keyboard soft-driver state in Tauri desktop runtime
+  // Sync macros & initial keyboard soft-driver / THX status in Tauri desktop runtime
   useEffect(() => {
     if (!isTauriRuntime()) return;
     void syncMacrosToEngine(macros);
   }, [macros]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void getThxStatus().then((st) => {
+      if (st) setThxStatus(st);
+    });
+  }, [activeSection]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -335,6 +347,43 @@ export default function App() {
     syncAudioHardware(next, headsetDevice);
   };
 
+  const handleRollbackAudio = () => {
+    void rollbackAudioConfig().then((res) => {
+      if (!res.ok) {
+        showNotice(res.error);
+        return;
+      }
+      const { uiConfig, thxSnapshot, detail } = res.data;
+      setAudioConfig((prev) => {
+        const base = uiConfig ?? prev;
+        if (!thxSnapshot) return base;
+        return {
+          ...base,
+          activePresetId:
+            thxSnapshot.eq_bands.every((b) => Math.abs(b) < 0.01) && !thxSnapshot.eq_enabled
+              ? 'flat'
+              : base.activePresetId,
+          bands: thxSnapshot.eq_bands.length === 10 ? thxSnapshot.eq_bands : base.bands,
+          surround71Enabled: thxSnapshot.spatial_enabled,
+          bassBoost: thxSnapshot.bassboost_enabled
+            ? Math.round(thxSnapshot.bassboost_level * 100)
+            : 0,
+          voiceClarity: thxSnapshot.voice_clarity_enabled
+            ? Math.round(thxSnapshot.voice_clarity_level * 100)
+            : 0,
+        };
+      });
+      showNotice(detail);
+    });
+  };
+
+  const handleHeadsetLedMode = (mode: number) => {
+    if (!headsetDevice) return;
+    void applyHeadsetLed(headsetDevice, mode).then((res) => {
+      showNotice(res.ok ? res.data.detail : res.error);
+    });
+  };
+
   const handleExportProfile = () => {
     const snapshot: AppProfileSnapshot = {
       schemaVersion: '2.0.0',
@@ -372,7 +421,11 @@ export default function App() {
   const handleWriteToHardware = () => {
     syncMouseHardware(mouseConfig, mouseDevice);
     syncKeyboardHardware(keyboardConfig, keyboardDevice);
-    syncAudioHardware(audioConfig, headsetDevice);
+    syncAudioHardware(audioConfig, headsetDevice, (res) => {
+      if (activeSection === 'audio') {
+        showNotice(res.detail);
+      }
+    });
     const snapshot: AppProfileSnapshot = {
       schemaVersion: '2.0.0',
       exportedAt: new Date().toISOString(),
@@ -494,7 +547,10 @@ export default function App() {
               <AudioStudioView
                 device={headsetDevice}
                 config={audioConfig}
+                thxStatus={thxStatus}
                 onChange={handleAudioChange}
+                onRollback={handleRollbackAudio}
+                onChangeLedMode={handleHeadsetLedMode}
                 onReset={() => {
                   handleAudioChange({
                     ...DEFAULT_AUDIO_CONFIG,

@@ -20,9 +20,14 @@ use vendor_protocols::{aggregate_real_peripherals, DiscoveredPeripheral};
 use win_battery::query_windows_bluetooth_devices;
 
 static ACTIVE_KEYBOARD_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+static ACTIVE_AUDIO_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 
 fn active_kbd_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
     ACTIVE_KEYBOARD_CFG.get_or_init(|| Mutex::new(None))
+}
+
+fn active_audio_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
+    ACTIVE_AUDIO_CFG.get_or_init(|| Mutex::new(None))
 }
 
 fn make_telemetry_callback(app: tauri::AppHandle) -> TelemetryCallback {
@@ -337,26 +342,174 @@ async fn rollback_keyboard_config() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+async fn get_thx_status() -> Result<protocols::thx_grpc::ThxStatus, String> {
+    Ok(protocols::thx_grpc::get_status().await)
+}
+
+#[tauri::command]
 async fn apply_audio_eq(config: serde_json::Value) -> Result<HidDispatchResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut payload = Vec::with_capacity(10);
-        if let Some(bands) = config.get("bands").and_then(|v| v.as_array()) {
-            for band in bands.iter().take(10) {
-                let db = band.as_f64().unwrap_or(0.0).clamp(-12.0, 12.0);
-                let encoded = ((db + 12.0) * 10.0).round() as u8;
-                payload.push(encoded);
-            }
+    let mut payload = Vec::with_capacity(10);
+    if let Some(bands) = config.get("bands").and_then(|v| v.as_array()) {
+        for band in bands.iter().take(10) {
+            let db = band.as_f64().unwrap_or(0.0).clamp(-12.0, 12.0);
+            let encoded = ((db + 12.0) * 10.0).round() as u8;
+            payload.push(encoded);
         }
-        let report = hid_protocol::build_feature_report(hid_protocol::CMD_SET_AUDIO_EQ, &payload);
-        HidDispatchResult {
+    }
+    let report = hid_protocol::build_feature_report(hid_protocol::CMD_SET_AUDIO_EQ, &payload);
+
+    if safety::is_readonly_mode() {
+        return Ok(HidDispatchResult {
             dispatched_to_hardware: false,
             report_bytes: report.to_vec(),
-            detail: "已保存 10 段 EQ 曲线（可一键导出 EqualizerAPO 配置应用至 Windows 全局音频）"
-                .to_string(),
+            detail: "全局只读安全模式已开启：已阻止 THX 服务写入，仅保存在本地配置".to_string(),
+        });
+    }
+
+    match protocols::thx_grpc::capture_headphones_snapshot().await {
+        Ok(live_snapshot) => {
+            if let Ok(dir) = portable_data_dir() {
+                if let Ok(mut guard) = active_audio_cfg_lock().lock() {
+                    match guard.as_ref() {
+                        None => {
+                            let snap_payload = serde_json::json!({
+                                "uiConfig": config,
+                                "thxSnapshot": live_snapshot,
+                            });
+                            let _ = safety::save_backup(
+                                &dir,
+                                "hecate_g5max_thx",
+                                "headset",
+                                "initial_baseline",
+                                snap_payload,
+                            );
+                        }
+                        Some(prev) if prev != &config => {
+                            let snap_payload = serde_json::json!({
+                                "uiConfig": prev,
+                                "thxSnapshot": live_snapshot,
+                            });
+                            let _ = safety::save_backup(
+                                &dir,
+                                "hecate_g5max_thx",
+                                "headset",
+                                "pre_write",
+                                snap_payload,
+                            );
+                        }
+                        _ => {}
+                    }
+                    *guard = Some(config.clone());
+                }
+            }
+
+            match protocols::thx_grpc::apply_ui_audio_config(&config, Some(&live_snapshot)).await {
+                Ok(_) => Ok(HidDispatchResult {
+                    dispatched_to_hardware: true,
+                    report_bytes: report.to_vec(),
+                    detail: "已实时同步 10 段 EQ 与 THX 空间声场至 HECATE G5 Max 服务".to_string(),
+                }),
+                Err(err) => Ok(HidDispatchResult {
+                    dispatched_to_hardware: false,
+                    report_bytes: report.to_vec(),
+                    detail: format!("THX 音效写入未完成（已保留本地曲线与 EqualizerAPO 导出）: {err}"),
+                }),
+            }
         }
+        Err(err) => Ok(HidDispatchResult {
+            dispatched_to_hardware: false,
+            report_bytes: report.to_vec(),
+            detail: format!("本地 THX 服务暂不可用，已保存 EQ 曲线（可导出 EqualizerAPO）: {err}"),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn rollback_audio_config() -> Result<serde_json::Value, String> {
+    if safety::is_readonly_mode() {
+        return Err("全局只读安全模式已开启，已拦截 THX 音效回滚写入".to_string());
+    }
+
+    let (target, restored_snap, ui_cfg) = tauri::async_runtime::spawn_blocking(|| {
+        let dir = portable_data_dir()?;
+        let current = active_audio_cfg_lock().lock().ok().and_then(|g| g.clone());
+        let backups = safety::list_backups(&dir, Some("hecate_g5max_thx"));
+        let target = backups
+            .iter()
+            .find(|b| {
+                let b_ui = b.payload.get("uiConfig");
+                match (current.as_ref(), b_ui) {
+                    (Some(cur), Some(bu)) => cur != bu,
+                    _ => true,
+                }
+            })
+            .or_else(|| backups.first())
+            .cloned()
+            .ok_or_else(|| "暂无可回滚的 HECATE THX 音效历史快照".to_string())?;
+
+        let thx_snap: protocols::thx_grpc::ThxAudioSnapshot = serde_json::from_value(
+            target
+                .payload
+                .get("thxSnapshot")
+                .cloned()
+                .ok_or_else(|| "备份快照缺少 thxSnapshot 字段".to_string())?,
+        )
+        .map_err(|e| format!("解析 THX 备份快照失败: {e}"))?;
+
+        let ui_cfg = target
+            .payload
+            .get("uiConfig")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        Ok::<_, String>((target, thx_snap, ui_cfg))
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())??;
+
+    protocols::thx_grpc::restore_thx_snapshot(&restored_snap).await?;
+    if !ui_cfg.is_null() {
+        if let Ok(mut guard) = active_audio_cfg_lock().lock() {
+            *guard = Some(ui_cfg.clone());
+        }
+    }
+
+    Ok(serde_json::json!({
+        "uiConfig": ui_cfg,
+        "thxSnapshot": restored_snap,
+        "restoredToThx": true,
+        "source": target.source,
+        "detail": "已从原子快照一键恢复 THX 10 段 EQ 与空间声场参数"
+    }))
+}
+
+#[tauri::command]
+async fn apply_headset_led(
+    vendor_id: String,
+    product_id: String,
+    led_path: String,
+    mode: u8,
+) -> Result<HidDispatchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let vid = parse_hex_id(&vendor_id).unwrap_or(0);
+        let pid = parse_hex_id(&product_id).unwrap_or(0);
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        let pkt = protocols::hecate_g5max::apply_g5max_led_mode(&api, &led_path, vid, pid, mode)?;
+        let mode_label = match mode.min(4) {
+            0 => "关闭",
+            1 => "常亮",
+            2 => "呼吸",
+            3 => "幻彩循环",
+            _ => "自定义",
+        };
+        Ok(HidDispatchResult {
+            dispatched_to_hardware: true,
+            report_bytes: pkt.to_vec(),
+            detail: format!("HECATE 耳机 RGB 灯效已切换为：{mode_label}"),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -409,7 +562,10 @@ pub fn run() {
             get_keyboard_engine_status,
             emergency_reset_keyboard_engine,
             rollback_keyboard_config,
+            get_thx_status,
             apply_audio_eq,
+            rollback_audio_config,
+            apply_headset_led,
             execute_macro,
         ])
         .build(tauri::generate_context!())

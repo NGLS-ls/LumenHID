@@ -43,6 +43,24 @@ export async function invokeNativeCommand<T>(
   }
 }
 
+export async function invokeNativeResult<T>(
+  cmd: string,
+  args?: Record<string, unknown>
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: '当前处于 Web 预览模式，请在 Windows 便携版 EXE 中执行硬件调用' };
+  }
+  try {
+    const data = await window.__TAURI_INTERNALS__!.invoke<T>(cmd, args);
+    return { ok: true, data };
+  } catch (err) {
+    return {
+      ok: false,
+      error: typeof err === 'string' ? err : err instanceof Error ? err.message : '原生调用失败',
+    };
+  }
+}
+
 export function loadSavedProfile(): AppProfileSnapshot | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -150,17 +168,75 @@ export async function rollbackKeyboardConfig(): Promise<KeyboardConfig | null> {
   return invokeNativeCommand<KeyboardConfig>('rollback_keyboard_config');
 }
 
+export interface ThxStatus {
+  available: boolean;
+  version: string | null;
+  endpoint: string | null;
+  detail: string;
+}
+
+export interface ThxAudioSnapshotPayload {
+  eq_enabled: boolean;
+  eq_bands: number[];
+  spatial_enabled: boolean;
+  upmix_enabled: boolean;
+  width_expansion_enabled: boolean;
+  bassboost_enabled: boolean;
+  bassboost_level: number;
+  voice_clarity_enabled: boolean;
+  voice_clarity_level: number;
+  volume_leveling_enabled: boolean;
+  volume_leveling_level: number;
+}
+
+export interface AudioRollbackResult {
+  uiConfig: AudioConfig | null;
+  thxSnapshot: ThxAudioSnapshotPayload | null;
+  restoredToThx: boolean;
+  source: string;
+  detail: string;
+}
+
+export async function getThxStatus(): Promise<ThxStatus | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<ThxStatus>('get_thx_status');
+}
+
 export function syncAudioHardware(
   config: AudioConfig,
-  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'> | null
+  device?: Pick<PeripheralDevice, 'vendorId' | 'productId'> | null,
+  onResult?: (res: HidDispatchResult) => void
 ): void {
   if (!isTauriRuntime() || !device) return;
   if (audioSyncTimer !== null) window.clearTimeout(audioSyncTimer);
   audioSyncTimer = window.setTimeout(() => {
-    void invokeNativeCommand('apply_audio_eq', {
+    void invokeNativeCommand<HidDispatchResult>('apply_audio_eq', {
       config: { ...config, vendorId: device.vendorId, productId: device.productId },
+    }).then((res) => {
+      if (res && onResult) onResult(res);
     });
   }, 120);
+}
+
+export async function rollbackAudioConfig(): Promise<
+  { ok: true; data: AudioRollbackResult } | { ok: false; error: string }
+> {
+  return invokeNativeResult<AudioRollbackResult>('rollback_audio_config');
+}
+
+export async function applyHeadsetLed(
+  device: Pick<PeripheralDevice, 'vendorId' | 'productId' | 'ledPath'>,
+  mode: number
+): Promise<{ ok: true; data: HidDispatchResult } | { ok: false; error: string }> {
+  if (!device.ledPath) {
+    return { ok: false, error: '当前耳机连接模式未检测到 RGB 灯效控制通道（请使用 2.4G 或有线连接）' };
+  }
+  return invokeNativeResult<HidDispatchResult>('apply_headset_led', {
+    vendorId: device.vendorId,
+    productId: device.productId,
+    ledPath: device.ledPath,
+    mode,
+  });
 }
 
 export async function triggerMacroHardware(macro: MacroDefinition): Promise<void> {

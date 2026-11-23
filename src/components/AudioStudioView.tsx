@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Plus, RotateCcw, Volume2, VolumeX } from 'lucide-react';
+import { Download, History, Plus, RotateCcw, Sparkles, Volume2, VolumeX } from 'lucide-react';
 import { BUILTIN_EQ_PRESETS, EQ_LABELS } from '../data/seedDevices';
 import type {
   AudioConfig,
@@ -14,13 +14,20 @@ import {
   generateEqCurvePath,
   generateEqualizerApoConfig,
 } from '../utils/deviceEngine';
-import { AudioPreviewEngine, downloadTextFile } from '../services/deviceBridge';
+import {
+  AudioPreviewEngine,
+  downloadTextFile,
+  type ThxStatus,
+} from '../services/deviceBridge';
 
 interface AudioStudioViewProps {
   device: PeripheralDevice | null;
   config: AudioConfig;
+  thxStatus?: ThxStatus | null;
   onChange: (next: AudioConfig) => void;
   onReset: () => void;
+  onRollback?: () => void;
+  onChangeLedMode?: (mode: number) => void;
   onExportApoNotice?: (message: string) => void;
 }
 
@@ -30,14 +37,25 @@ const ROOM_MODES: { id: RoomAcousticsMode; label: string }[] = [
   { id: 'hall', label: '音乐厅' },
 ];
 
+const LED_MODES: { mode: number; label: string }[] = [
+  { mode: 0, label: '关闭' },
+  { mode: 1, label: '常亮' },
+  { mode: 2, label: '呼吸' },
+  { mode: 3, label: '幻彩循环' },
+];
+
 export function AudioStudioView({
   device,
   config,
+  thxStatus,
   onChange,
   onReset,
+  onRollback,
+  onChangeLedMode,
   onExportApoNotice,
 }: AudioStudioViewProps) {
   const [auditioning, setAuditioning] = useState(false);
+  const [activeLedMode, setActiveLedMode] = useState<number>(3);
   const [customPresetName, setCustomPresetName] = useState('');
   const [presetError, setPresetError] = useState<string | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<AudioConfig['spatialChannels'][number]['id']>('C');
@@ -164,6 +182,28 @@ export function AudioStudioView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {thxStatus && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[11px] font-medium whitespace-nowrap ${
+                thxStatus.available
+                  ? 'border-[#C4DCD9] bg-[#EBF3F2] text-[#1D4E4C]'
+                  : 'border-[#E5E9EE] bg-[#F4F6F8] text-[#586370]'
+              }`}
+              title={thxStatus.detail}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  thxStatus.available ? 'bg-[#1D7A5F]' : 'bg-[#94A3B8]'
+                }`}
+              />
+              <span>
+                {thxStatus.available
+                  ? `THX gRPC v${thxStatus.version ?? 'Online'}`
+                  : 'THX 服务离线 · APO 兜底'}
+              </span>
+            </span>
+          )}
+
           <button
             type="button"
             onClick={handleExportEqualizerApo}
@@ -186,6 +226,17 @@ export function AudioStudioView({
             <span>{auditioning ? '停止声学试听' : '实时 EQ 试听'}</span>
           </button>
 
+          {onRollback && (
+            <button
+              type="button"
+              onClick={onRollback}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4DFDD] bg-white px-3 py-2 text-xs font-medium text-[#1D4E4C] hover:bg-[#EBF3F2] transition-colors whitespace-nowrap"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>回滚上一版音效</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onReset}
@@ -200,6 +251,37 @@ export function AudioStudioView({
       {device?.protocolNote && (
         <div className="rounded-xl border border-[#DCE5E4] bg-[#F4F8F7] px-4 py-2.5 text-xs leading-relaxed text-[#1D4E4C]">
           {device.protocolNote}
+        </div>
+      )}
+
+      {device?.ledPath && onChangeLedMode && (
+        <div className="flex flex-col gap-2.5 rounded-2xl border border-[#E5E9EE] bg-white px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-xs font-medium text-[#181C20]">
+            <Sparkles className="h-4 w-4 text-[#2B6B68]" />
+            <span>HECATE G5 Max 耳机 RGB 氛围灯效（HID 0xED 安全直写）</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {LED_MODES.map((item) => {
+              const active = activeLedMode === item.mode;
+              return (
+                <button
+                  key={item.mode}
+                  type="button"
+                  onClick={() => {
+                    setActiveLedMode(item.mode);
+                    onChangeLedMode(item.mode);
+                  }}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+                    active
+                      ? 'bg-[#2B6B68] text-white'
+                      : 'bg-[#F0F3F6] text-[#586370] hover:bg-[#E5E9EE] hover:text-[#181C20]'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
