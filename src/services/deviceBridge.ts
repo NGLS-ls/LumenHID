@@ -73,7 +73,6 @@ export async function saveProfileSnapshot(snapshot: AppProfileSnapshot): Promise
 
 // Debounce timers prevent saturating HID I/O or disk writes while dragging sliders
 let mouseSyncTimer: number | null = null;
-let keyboardSyncTimer: number | null = null;
 let audioSyncTimer: number | null = null;
 
 export function syncMouseHardware(
@@ -94,17 +93,61 @@ export function syncMouseHardware(
   }, 120);
 }
 
-export function syncKeyboardHardware(
+export interface HidDispatchResult {
+  dispatched_to_hardware: boolean;
+  report_bytes: number[];
+  detail: string;
+}
+
+export interface KeyboardEngineStatus {
+  engine_enabled: boolean;
+  hook_installed: boolean;
+  active_layer: string;
+  active_bindings_count: number;
+  socd_enabled: boolean;
+  win_key_locked: boolean;
+  software_debounce_ms: number;
+  panic_triggered: boolean;
+  last_notice: string | null;
+}
+
+export async function syncKeyboardHardware(
   config: KeyboardConfig,
   device?: Pick<PeripheralDevice, 'vendorId' | 'productId'> | null
-): void {
-  if (!isTauriRuntime() || !device) return;
-  if (keyboardSyncTimer !== null) window.clearTimeout(keyboardSyncTimer);
-  keyboardSyncTimer = window.setTimeout(() => {
-    void invokeNativeCommand('apply_keyboard_config', {
-      config: { ...config, vendorId: device.vendorId, productId: device.productId },
-    });
-  }, 120);
+): Promise<HidDispatchResult | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<HidDispatchResult>('apply_keyboard_config', {
+    config: {
+      ...config,
+      vendorId: device?.vendorId ?? null,
+      productId: device?.productId ?? null,
+    },
+  });
+}
+
+export async function syncMacrosToEngine(macros: MacroDefinition[]): Promise<number | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<number>('sync_macros_to_engine', { macros });
+}
+
+export async function setKeyboardEngineEnabled(enabled: boolean): Promise<KeyboardEngineStatus | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<KeyboardEngineStatus>('set_keyboard_engine_enabled', { enabled });
+}
+
+export async function getKeyboardEngineStatus(): Promise<KeyboardEngineStatus | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<KeyboardEngineStatus>('get_keyboard_engine_status');
+}
+
+export async function emergencyResetKeyboardEngine(): Promise<KeyboardEngineStatus | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<KeyboardEngineStatus>('emergency_reset_keyboard_engine');
+}
+
+export async function rollbackKeyboardConfig(): Promise<KeyboardConfig | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<KeyboardConfig>('rollback_keyboard_config');
 }
 
 export function syncAudioHardware(

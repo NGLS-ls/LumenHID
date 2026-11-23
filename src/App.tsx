@@ -24,15 +24,21 @@ import type {
 import { parseAndValidateProfile, serializeProfile } from './utils/deviceEngine';
 import {
   downloadTextFile,
+  emergencyResetKeyboardEngine,
+  getKeyboardEngineStatus,
   isTauriRuntime,
   loadSavedProfile,
   refreshNativeBatteries,
+  rollbackKeyboardConfig,
   saveProfileSnapshot,
   scanNativeWindowsDevices,
+  setKeyboardEngineEnabled,
   syncAudioHardware,
   syncKeyboardHardware,
+  syncMacrosToEngine,
   syncMouseHardware,
   triggerMacroHardware,
+  type KeyboardEngineStatus,
   type TelemetryEventPayload,
 } from './services/deviceBridge';
 
@@ -71,6 +77,9 @@ export default function App() {
   );
 
   const [notice, setNotice] = useState<string | null>(null);
+  const [keyboardEngineStatus, setKeyboardEngineStatus] = useState<KeyboardEngineStatus | null>(
+    null
+  );
   const saveTimerRef = useRef<number | null>(null);
 
   const showNotice = useCallback((msg: string) => {
@@ -105,6 +114,34 @@ export default function App() {
       cancelled = true;
     };
   }, [mergeScannedDevices]);
+
+  // Sync macros & initial keyboard soft-driver state in Tauri desktop runtime
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void syncMacrosToEngine(macros);
+  }, [macros]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void syncKeyboardHardware(keyboardConfig, null).then(() => {
+      void getKeyboardEngineStatus().then((st) => {
+        if (st) setKeyboardEngineStatus(st);
+      });
+    });
+
+    const onKbdStatus = (ev: Event) => {
+      const detail = (ev as CustomEvent<KeyboardEngineStatus>).detail;
+      if (!detail) return;
+      setKeyboardEngineStatus(detail);
+      if (detail.last_notice) {
+        showNotice(detail.last_notice);
+      }
+    };
+    window.addEventListener('lumen-keyboard-status', onKbdStatus);
+    return () => {
+      window.removeEventListener('lumen-keyboard-status', onKbdStatus);
+    };
+  }, [showNotice]);
 
   // Periodic light battery refresh every 15s + instant passive telemetry listener in desktop runtime
   useEffect(() => {
@@ -253,8 +290,44 @@ export default function App() {
           d.id === keyboardDevice.id ? { ...d, pollingRateHz: next.pollingRateHz } : d
         )
       );
-      syncKeyboardHardware(next, keyboardDevice);
     }
+    void syncKeyboardHardware(next, keyboardDevice).then(() => {
+      void getKeyboardEngineStatus().then((st) => {
+        if (st) setKeyboardEngineStatus(st);
+      });
+    });
+  };
+
+  const handleToggleKeyboardEngine = (enabled: boolean) => {
+    void setKeyboardEngineEnabled(enabled).then((st) => {
+      if (st) {
+        setKeyboardEngineStatus(st);
+        if (st.last_notice) showNotice(st.last_notice);
+      }
+    });
+  };
+
+  const handleEmergencyStopKeyboard = () => {
+    void emergencyResetKeyboardEngine().then((st) => {
+      if (st) {
+        setKeyboardEngineStatus(st);
+        if (st.last_notice) showNotice(st.last_notice);
+      }
+    });
+  };
+
+  const handleRollbackKeyboard = () => {
+    void rollbackKeyboardConfig().then((restored) => {
+      if (restored) {
+        setKeyboardConfig(restored);
+        void getKeyboardEngineStatus().then((st) => {
+          if (st) setKeyboardEngineStatus(st);
+        });
+        showNotice('已成功回滚至上一份键盘软驱动配置快照');
+      } else {
+        showNotice('暂无可回滚的键盘配置历史快照');
+      }
+    });
   };
 
   const handleAudioChange = (next: AudioConfig) => {
@@ -394,11 +467,15 @@ export default function App() {
                 device={keyboardDevice}
                 config={keyboardConfig}
                 macros={macros}
+                engineStatus={keyboardEngineStatus}
                 onChange={handleKeyboardChange}
                 onReset={() => {
                   handleKeyboardChange(DEFAULT_KEYBOARD_CONFIG);
                   showNotice('键盘键位与轴体参数已恢复默认');
                 }}
+                onToggleEngine={handleToggleKeyboardEngine}
+                onEmergencyStop={handleEmergencyStopKeyboard}
+                onRollback={handleRollbackKeyboard}
               />
             )}
 

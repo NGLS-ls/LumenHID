@@ -1,4 +1,5 @@
 mod hid_protocol;
+mod keyboard_engine;
 mod protocols;
 mod safety;
 mod telemetry_daemon;
@@ -6,16 +7,23 @@ mod vendor_protocols;
 mod win_battery;
 
 use hidapi::HidApi;
+use keyboard_engine::KeyboardEngineStatus;
 use protocols::TelemetryEvent;
 use safety::{BackupSnapshot, HardwareSafetyGuard, SafetyStatus};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Manager;
 use telemetry_daemon::TelemetryCallback;
 use vendor_protocols::{aggregate_real_peripherals, DiscoveredPeripheral};
 use win_battery::query_windows_bluetooth_devices;
+
+static ACTIVE_KEYBOARD_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn active_kbd_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
+    ACTIVE_KEYBOARD_CFG.get_or_init(|| Mutex::new(None))
+}
 
 fn make_telemetry_callback(app: tauri::AppHandle) -> TelemetryCallback {
     Arc::new(move |payload: TelemetryEvent| {
@@ -224,15 +232,108 @@ async fn apply_keyboard_config(config: serde_json::Value) -> Result<HidDispatchR
         let payload = actuation_tenths.to_be_bytes();
         let report =
             hid_protocol::build_feature_report(hid_protocol::CMD_SET_KEYBOARD_ACTUATION, &payload);
-        // Safe by design: never blind-write unknown Sinowealth Flash pages
+
+        if let Ok(dir) = portable_data_dir() {
+            if let Ok(mut guard) = active_kbd_cfg_lock().lock() {
+                match guard.as_ref() {
+                    None => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "keyboard_soft_driver",
+                            "keyboard",
+                            "initial_baseline",
+                            config.clone(),
+                        );
+                    }
+                    Some(prev) if prev != &config => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "keyboard_soft_driver",
+                            "keyboard",
+                            "pre_write",
+                            prev.clone(),
+                        );
+                    }
+                    _ => {}
+                }
+                *guard = Some(config.clone());
+            }
+        }
+
+        let status = keyboard_engine::update_config(&config);
+        if safety::is_readonly_mode() {
+            return HidDispatchResult {
+                dispatched_to_hardware: false,
+                report_bytes: report.to_vec(),
+                detail: "全局只读安全模式已开启：已保存键盘配置，软驱动暂不拦截物理按键".to_string(),
+            };
+        }
+
         HidDispatchResult {
-            dispatched_to_hardware: false,
+            dispatched_to_hardware: true,
             report_bytes: report.to_vec(),
-            detail: "已安全保存键盘配置至便携目录（避免盲写非公开 Flash 分区）".to_string(),
+            detail: format!(
+                "键盘软驱动已同步（层 {} · 映射 {} 键 · 零 Flash 写入风险）",
+                status.active_layer.to_uppercase(),
+                status.active_bindings_count
+            ),
         }
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn sync_macros_to_engine(macros: serde_json::Value) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || keyboard_engine::sync_macros(&macros))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_keyboard_engine_enabled(enabled: bool) -> Result<KeyboardEngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || keyboard_engine::set_engine_enabled(enabled))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_keyboard_engine_status() -> Result<KeyboardEngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(keyboard_engine::get_status)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn emergency_reset_keyboard_engine() -> Result<KeyboardEngineStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        keyboard_engine::emergency_reset("已手动触发紧急停用，键盘软驱动已切回原厂直通")
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn rollback_keyboard_config() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let dir = portable_data_dir()?;
+        let current = active_kbd_cfg_lock().lock().ok().and_then(|g| g.clone());
+        let backups = safety::list_backups(&dir, Some("keyboard_soft_driver"));
+        let target = backups
+            .iter()
+            .find(|b| current.as_ref().map(|c| c != &b.payload).unwrap_or(true))
+            .or_else(|| backups.first())
+            .cloned()
+            .ok_or_else(|| "暂无可回滚的键盘配置备份快照".to_string())?;
+
+        if let Ok(mut guard) = active_kbd_cfg_lock().lock() {
+            *guard = Some(target.payload.clone());
+        }
+        keyboard_engine::update_config(&target.payload);
+        Ok(target.payload)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -260,17 +361,14 @@ async fn apply_audio_eq(config: serde_json::Value) -> Result<HidDispatchResult, 
 
 #[tauri::command]
 async fn execute_macro(macro_def: serde_json::Value) -> Result<usize, String> {
-    let step_count = macro_def
-        .get("steps")
-        .and_then(|v| v.as_array())
-        .map(|s| s.len())
-        .unwrap_or(0);
-    Ok(step_count)
+    tauri::async_runtime::spawn_blocking(move || keyboard_engine::run_macro_once(&macro_def))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             // Ensure the Windows taskbar & titlebar icon is always mounted at runtime as well as in PE resources
             if let (Some(window), Some(icon)) =
@@ -278,6 +376,21 @@ pub fn run() {
             {
                 let _ = window.set_icon(icon.clone());
             }
+
+            let handle = app.handle().clone();
+            keyboard_engine::set_notice_callback(Arc::new(move |msg: String| {
+                let status = keyboard_engine::get_status();
+                if let (Some(win), Ok(json)) = (
+                    handle.get_webview_window("main"),
+                    serde_json::to_string(&status),
+                ) {
+                    let js = format!(
+                        "window.dispatchEvent(new CustomEvent('lumen-keyboard-status', {{ detail: {json} }}));"
+                    );
+                    let _ = win.eval(&js);
+                }
+                let _ = msg;
+            }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -291,11 +404,22 @@ pub fn run() {
             refresh_device_battery,
             apply_mouse_config,
             apply_keyboard_config,
+            sync_macros_to_engine,
+            set_keyboard_engine_enabled,
+            get_keyboard_engine_status,
+            emergency_reset_keyboard_engine,
+            rollback_keyboard_config,
             apply_audio_eq,
             execute_macro,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running LumenHID Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building LumenHID Tauri application");
+
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            keyboard_engine::shutdown();
+        }
+    });
 }
 
 #[cfg(test)]

@@ -98,6 +98,8 @@ export interface KeyboardConfig {
   socdPairs: [string, string][];
   nkroEnabled: boolean;
   winKeyLocked: boolean;
+  softDriverEnabled?: boolean;
+  softwareDebounceMs?: number;
   lightingMode: AmbientLightingMode;
   lightingBrightness: number; // 0 to 100
   layerBindings: Record<KeyboardLayerId, Record<string, KeyBinding>>;

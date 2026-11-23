@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { History, OctagonAlert, Power, RotateCcw, ShieldCheck } from 'lucide-react';
 import { KEYBOARD_75_ROWS } from '../data/seedDevices';
+import type { KeyboardEngineStatus } from '../services/deviceBridge';
 import type {
   AmbientLightingMode,
   KeyBinding,
@@ -15,8 +16,12 @@ interface KeyboardViewProps {
   device: PeripheralDevice | null;
   config: KeyboardConfig;
   macros: MacroDefinition[];
+  engineStatus?: KeyboardEngineStatus | null;
   onChange: (next: KeyboardConfig) => void;
   onReset: () => void;
+  onToggleEngine?: (enabled: boolean) => void;
+  onEmergencyStop?: () => void;
+  onRollback?: () => void;
 }
 
 const LAYERS: { id: KeyboardLayerId; label: string }[] = [
@@ -44,7 +49,17 @@ const KEYBOARD_QUICK_REMAPS: KeyBinding[] = [
   { type: 'disabled', value: 'None', label: '已禁用' },
 ];
 
-export function KeyboardView({ device, config, macros, onChange, onReset }: KeyboardViewProps) {
+export function KeyboardView({
+  device,
+  config,
+  macros,
+  engineStatus,
+  onChange,
+  onReset,
+  onToggleEngine,
+  onEmergencyStop,
+  onRollback,
+}: KeyboardViewProps) {
   const [selectedKeyCode, setSelectedKeyCode] = useState<string>('CapsLock');
 
   const currentLayerMap = config.layerBindings[config.activeLayer] ?? {};
@@ -112,14 +127,26 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onReset}
-          className="inline-flex items-center gap-1.5 self-start rounded-lg border border-[#E5E9EE] bg-white px-3.5 py-2 text-xs font-medium text-[#586370] hover:bg-[#F0F3F6] hover:text-[#181C20] transition-colors whitespace-nowrap"
-        >
-          <RotateCcw className="h-3.5 w-3.5" />
-          <span>恢复默认键位</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onRollback && (
+            <button
+              type="button"
+              onClick={onRollback}
+              className="inline-flex items-center gap-1.5 self-start rounded-lg border border-[#E5E9EE] bg-white px-3.5 py-2 text-xs font-medium text-[#181C20] hover:bg-[#F0F3F6] transition-colors whitespace-nowrap"
+            >
+              <History className="h-3.5 w-3.5 text-[#586370]" />
+              <span>回滚上一版</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onReset}
+            className="inline-flex items-center gap-1.5 self-start rounded-lg border border-[#E5E9EE] bg-white px-3.5 py-2 text-xs font-medium text-[#586370] hover:bg-[#F0F3F6] hover:text-[#181C20] transition-colors whitespace-nowrap"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            <span>恢复默认键位</span>
+          </button>
+        </div>
       </div>
 
       {device?.protocolNote && (
@@ -127,6 +154,90 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
           {device.protocolNote}
         </div>
       )}
+
+      {/* Windows User-Mode Soft Driver Engine Control Bar (Zero-Brick Safe) */}
+      <section className="rounded-2xl border border-[#E5E9EE] bg-white p-4 sm:p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-3">
+            <div
+              className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+                engineStatus?.panic_triggered
+                  ? 'bg-[#FEE2E2] text-[#B91C1C]'
+                  : engineStatus?.hook_installed
+                    ? 'bg-[#EBF3F2] text-[#2B6B68]'
+                    : 'bg-[#F0F3F6] text-[#586370]'
+              }`}
+            >
+              <ShieldCheck className="h-4 w-4" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-[#181C20]">
+                  Windows 用户态键盘软驱动引擎（零 Flash 写入 / 永不变砖）
+                </span>
+                <span
+                  className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-medium ${
+                    engineStatus?.panic_triggered
+                      ? 'bg-[#FEE2E2] text-[#B91C1C]'
+                      : engineStatus?.hook_installed
+                        ? 'bg-[#EBF3F2] text-[#1D4E4C]'
+                        : 'bg-[#F0F3F6] text-[#586370]'
+                  }`}
+                >
+                  {engineStatus?.panic_triggered
+                    ? '已熔断直通'
+                    : engineStatus?.hook_installed
+                      ? '钩子已实时接管'
+                      : engineStatus?.engine_enabled === false || config.softDriverEnabled === false
+                        ? '原厂直通暂停中'
+                        : '待命（配置规则后自动启用）'}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-[#586370]">
+                全面支持蓝牙 / 2.4G / USB 任意键盘的改键、组合键、多媒体、宏、SOCD 急停与防抖。紧急恢复热键：
+                <kbd className="mx-1 rounded border border-[#D3DAE2] bg-[#F7F8FA] px-1.5 py-0.5 font-mono text-[11px] text-[#181C20]">
+                  Ctrl + Alt + Esc
+                </kbd>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {onToggleEngine && (
+              <button
+                type="button"
+                onClick={() => {
+                  const nextEnabled = !(engineStatus?.engine_enabled ?? config.softDriverEnabled ?? true);
+                  onChange({ ...config, softDriverEnabled: nextEnabled });
+                  onToggleEngine(nextEnabled);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                  (engineStatus?.engine_enabled ?? config.softDriverEnabled ?? true)
+                    ? 'bg-[#2B6B68] text-white hover:bg-[#215452]'
+                    : 'border border-[#E5E9EE] bg-[#F6F7F9] text-[#181C20] hover:bg-[#EEF1F4]'
+                }`}
+              >
+                <Power className="h-3.5 w-3.5" />
+                <span>
+                  {(engineStatus?.engine_enabled ?? config.softDriverEnabled ?? true)
+                    ? '软驱动运行中（点击暂停）'
+                    : '恢复软驱动接管'}
+                </span>
+              </button>
+            )}
+            {onEmergencyStop && (
+              <button
+                type="button"
+                onClick={onEmergencyStop}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs font-medium text-[#B91C1C] hover:bg-[#FEE2E2] transition-colors whitespace-nowrap"
+              >
+                <OctagonAlert className="h-3.5 w-3.5" />
+                <span>一键紧急熔断</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* 75% Interactive Keymap Surface */}
       <section className="rounded-2xl border border-[#E5E9EE] bg-white p-5 sm:p-6">
@@ -324,6 +435,12 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
             </button>
           </div>
 
+          {device?.protocolSupport === 'soft-driver-safe' && (
+            <div className="mt-3 rounded-xl border border-[#E5E9EE] bg-[#F7F8FA] px-3.5 py-2 text-[11px] leading-relaxed text-[#586370]">
+              当前设备为传统机械轴键盘（无霍尔磁轴传感器），下方触发深度仅作本地预设记录；上方的改键、多层、宏、SOCD、锁 Win 与防抖已通过软驱动真实生效。
+            </div>
+          )}
+
           <div className="mt-5 grid grid-cols-1 gap-6 sm:grid-cols-12 items-center">
             {/* Minimalist vertical travel visualizer */}
             <div className="sm:col-span-4 flex flex-col items-center rounded-xl bg-[#F6F7F9] p-4">
@@ -445,6 +562,29 @@ export function KeyboardView({ device, config, macros, onChange, onReset }: Keyb
                 </button>
               );
             })}
+          </div>
+
+          <div className="border-t border-[#EEF1F4] pt-4 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <label htmlFor="kbd-soft-debounce" className="font-medium text-[#181C20]">
+                软件防抖滤波（消除老轴双击）
+              </label>
+              <span className="font-mono font-semibold tabular-nums text-[#2B6B68]">
+                {config.softwareDebounceMs ?? 0} ms
+              </span>
+            </div>
+            <input
+              id="kbd-soft-debounce"
+              type="range"
+              min={0}
+              max={25}
+              step={1}
+              value={config.softwareDebounceMs ?? 0}
+              onChange={(e) =>
+                onChange({ ...config, softwareDebounceMs: Number(e.target.value) })
+              }
+              className="lumen-slider w-full"
+            />
           </div>
 
           <div className="border-t border-[#EEF1F4] pt-4 space-y-3">

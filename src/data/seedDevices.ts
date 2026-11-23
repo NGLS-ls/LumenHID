@@ -187,6 +187,8 @@ export const DEFAULT_KEYBOARD_CONFIG: KeyboardConfig = {
   socdPairs: [['KeyA', 'KeyD']],
   nkroEnabled: true,
   winKeyLocked: false,
+  softDriverEnabled: true,
+  softwareDebounceMs: 0,
   lightingMode: 'static-mist',
   lightingBrightness: 50,
   layerBindings: {
