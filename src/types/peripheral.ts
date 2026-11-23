@@ -8,6 +8,7 @@ export type ProtocolSupportLevel =
   | 'native-full'
   | 'native-battery-experimental-tuning'
   | 'native-battery-readonly'
+  | 'soft-driver-safe'
   | 'system-apo';
 
 export interface PeripheralDevice {
@@ -25,6 +26,8 @@ export interface PeripheralDevice {
   vendorId: string; // e.g. "0x1D57"
   productId: string; // e.g. "0xFA65"
   vendorControlPath?: string | null;
+  telemetryPath?: string | null;
+  ledPath?: string | null;
   protocolSupport: ProtocolSupportLevel;
   protocolNote: string;
   pollingRateHz: number;

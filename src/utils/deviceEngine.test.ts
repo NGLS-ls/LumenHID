@@ -116,17 +116,27 @@ test('classifyKnownPeripheral recognizes Inphic KP 8K, K98PRO 5.0, and Edifier H
   const inphic = classifyKnownPeripheral('0x1D57', '0xFA65', 'Inphic KP 8K');
   assert.equal(inphic.category, 'mouse');
   assert.equal(inphic.maxPollingHz, 8000);
-  assert.equal(inphic.protocolSupport, 'native-battery-experimental-tuning');
+  assert.equal(inphic.protocolSupport, 'native-full');
 
   const k98 = classifyKnownPeripheral('0x258A', '0x0040', '1.0.0');
   assert.equal(k98.displayName, '凌豹 K98PRO 5.0');
   assert.equal(k98.category, 'keyboard');
-  assert.equal(k98.protocolSupport, 'native-battery-readonly');
+  assert.equal(k98.protocolSupport, 'soft-driver-safe');
+
+  const k98Usb = classifyKnownPeripheral('0x258A', '0x019D', 'Gaming Keyboard');
+  assert.equal(k98Usb.displayName, '凌豹 K98PRO (USB/2.4G)');
+  assert.equal(k98Usb.category, 'keyboard');
+  assert.equal(k98Usb.protocolSupport, 'soft-driver-safe');
 
   const g5 = classifyKnownPeripheral('BT-PNP', 'BT-AUDIO', 'HECATE G5 Max');
   assert.equal(g5.displayName, '漫步者 HECATE G5 Max');
   assert.equal(g5.category, 'headset');
   assert.equal(g5.protocolSupport, 'system-apo');
+
+  const g5Wireless = classifyKnownPeripheral('0x35BB', '0xA00B', 'HECATE G5 Max无线版');
+  assert.equal(g5Wireless.displayName, '漫步者 HECATE G5 Max 无线版');
+  assert.equal(g5Wireless.category, 'headset');
+  assert.equal(g5Wireless.protocolSupport, 'native-full');
 });
 
 test('generateEqualizerApoConfig emits valid GraphicEQ & Preamp lines', () => {

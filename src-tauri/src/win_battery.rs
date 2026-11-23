@@ -2,6 +2,8 @@
 //! `setupapi.dll` FFI (`DEVPKEY_Bluetooth_Battery`, GUID `{104EA319-6EE2-4701-BD47-8DDBF425BBE5}`, pid 2).
 //! Executes in <5ms without spawning PowerShell or external processes.
 
+use std::collections::HashMap;
+
 #[derive(Debug, Clone)]
 pub struct WinBluetoothDeviceInfo {
     pub name: String,
@@ -9,10 +11,11 @@ pub struct WinBluetoothDeviceInfo {
     pub product_id: Option<u16>,
     pub battery_percent: Option<u8>,
     pub hardware_id: String,
+    pub ble_mac: Option<String>,
 }
 
 /// Parses `VID_xxxx` and `PID_xxxx` (or `VID&0002xxxx_PID&xxxx` for Bluetooth Classic/BLE)
-/// from Windows PnP Hardware ID strings.
+/// from Windows PnP Hardware ID or Instance ID strings.
 pub fn extract_vid_pid_from_hwid(hwid: &str) -> (Option<u16>, Option<u16>) {
     let upper = hwid.to_ascii_uppercase();
     let vid = find_hex_after_prefix(&upper, "VID_")
@@ -22,6 +25,88 @@ pub fn extract_vid_pid_from_hwid(hwid: &str) -> (Option<u16>, Option<u16>) {
     let pid = find_hex_after_prefix(&upper, "PID_")
         .or_else(|| find_hex_after_prefix(&upper, "PID&"));
     (vid, pid)
+}
+
+/// Extracts a 12-hex BLE/Bluetooth device address (MAC) from Windows PnP InstanceId / HID path,
+/// such as `BTHLE\DEV_FF0F00191294\...` or `..._REV&0300_FF0F00191294\...`.
+pub fn extract_ble_mac(text: &str) -> Option<String> {
+    let upper = text.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let len = bytes.len();
+
+    for i in 0..len {
+        let matched_prefix = if bytes[i..].starts_with(b"DEV_") {
+            Some(i + 4)
+        } else if bytes[i] == b'_' {
+            Some(i + 1)
+        } else {
+            None
+        };
+
+        if let Some(start) = matched_prefix {
+            if start + 12 <= len {
+                let candidate = &bytes[start..start + 12];
+                let all_hex = candidate.iter().all(|b| b.is_ascii_hexdigit());
+                let valid_end = start + 12 == len
+                    || matches!(
+                        bytes[start + 12],
+                        b'\\' | b'#' | b'&' | b' ' | b'\0'
+                    );
+                if all_hex && valid_end {
+                    return std::str::from_utf8(candidate).ok().map(str::to_string);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_generic_bt_service_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("通用属性")
+        || lower.contains("通用访问")
+        || lower.contains("设备信息服务")
+        || lower.contains("generic attribute")
+        || lower.contains("generic access")
+        || lower.contains("device information service")
+        || lower.contains("符合蓝牙低能耗 gatt")
+        || lower.contains("microsoft bluetooth")
+}
+
+/// Coalesces sibling PnP nodes sharing the same `ble_mac` (e.g. `BTHLE\DEV_<MAC>` holding
+/// friendly name + battery, and `BTHLEDEVICE\{00001812-...}_..._<MAC>` holding VID/PID).
+pub fn coalesce_bt_devices(devices: Vec<WinBluetoothDeviceInfo>) -> Vec<WinBluetoothDeviceInfo> {
+    let mut by_mac: HashMap<String, usize> = HashMap::new();
+    let mut merged: Vec<WinBluetoothDeviceInfo> = Vec::new();
+
+    for dev in devices {
+        if let Some(ref mac) = dev.ble_mac {
+            if let Some(&idx) = by_mac.get(mac) {
+                let existing = &mut merged[idx];
+                if existing.vendor_id.is_none() {
+                    existing.vendor_id = dev.vendor_id;
+                }
+                if existing.product_id.is_none() {
+                    existing.product_id = dev.product_id;
+                }
+                if existing.battery_percent.is_none() && dev.battery_percent.is_some() {
+                    existing.battery_percent = dev.battery_percent;
+                }
+                if (is_generic_bt_service_name(&existing.name) || existing.name.is_empty())
+                    && !is_generic_bt_service_name(&dev.name)
+                    && !dev.name.is_empty()
+                {
+                    existing.name = dev.name;
+                    existing.hardware_id = dev.hardware_id;
+                }
+                continue;
+            }
+            by_mac.insert(mac.clone(), merged.len());
+        }
+        merged.push(dev);
+    }
+
+    merged
 }
 
 fn find_hex_after_prefix(haystack: &str, prefix: &str) -> Option<u16> {
@@ -42,7 +127,9 @@ fn find_hex_after_prefix(haystack: &str, prefix: &str) -> Option<u16> {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::{extract_vid_pid_from_hwid, WinBluetoothDeviceInfo};
+    use super::{
+        coalesce_bt_devices, extract_ble_mac, extract_vid_pid_from_hwid, WinBluetoothDeviceInfo,
+    };
     use std::mem;
     use std::ptr;
 
@@ -154,7 +241,36 @@ mod imp {
             required_size: *mut u32,
             flags: u32,
         ) -> i32;
+        fn SetupDiGetDeviceInstanceIdW(
+            device_info_set: isize,
+            device_info_data: *const SpDevinfoData,
+            device_instance_id: *mut u16,
+            device_instance_id_size: u32,
+            required_size: *mut u32,
+        ) -> i32;
         fn SetupDiDestroyDeviceInfoList(device_info_set: isize) -> i32;
+    }
+
+    unsafe fn read_instance_id(dev_info: isize, dev_data: &SpDevinfoData) -> Option<String> {
+        let mut buf = [0u16; 512];
+        let mut req_len: u32 = 0;
+        let ok = SetupDiGetDeviceInstanceIdW(
+            dev_info,
+            dev_data,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut req_len,
+        );
+        if ok == 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let s = String::from_utf16_lossy(&buf[..end]).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     unsafe fn read_utf16_property(
@@ -195,7 +311,6 @@ mod imp {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        // Join multi-sz strings with space and trim trailing nulls
         let joined = String::from_utf16_lossy(&u16s)
             .replace('\0', " ")
             .split_whitespace()
@@ -273,12 +388,12 @@ mod imp {
                 let battery = read_battery_property(dev_info, &dev_data);
                 let hwid = read_utf16_property(dev_info, &dev_data, &DEVPKEY_DEVICE_HARDWARE_IDS)
                     .unwrap_or_default();
+                let instance_id = read_instance_id(dev_info, &dev_data).unwrap_or_default();
 
-                // Only inspect devices that either report Bluetooth battery or are Bluetooth/BTHLE/USB Audio peripherals
-                let hwid_upper = hwid.to_ascii_uppercase();
-                let is_bt = hwid_upper.contains("BTHENUM")
-                    || hwid_upper.contains("BTHLE")
-                    || hwid_upper.contains("BLUETOOTH");
+                let id_upper = format!("{hwid} {instance_id}").to_ascii_uppercase();
+                let is_bt = id_upper.contains("BTHENUM")
+                    || id_upper.contains("BTHLE")
+                    || id_upper.contains("BLUETOOTH");
                 if battery.is_none() && !is_bt {
                     continue;
                 }
@@ -291,19 +406,29 @@ mod imp {
                     continue;
                 }
 
-                let (vendor_id, product_id) = extract_vid_pid_from_hwid(&hwid);
+                let (v1, p1) = extract_vid_pid_from_hwid(&hwid);
+                let (v2, p2) = extract_vid_pid_from_hwid(&instance_id);
+                let vendor_id = v1.or(v2);
+                let product_id = p1.or(p2);
+                let ble_mac = extract_ble_mac(&instance_id).or_else(|| extract_ble_mac(&hwid));
+
                 out.push(WinBluetoothDeviceInfo {
                     name: name.trim().to_string(),
                     vendor_id,
                     product_id,
                     battery_percent: battery,
-                    hardware_id: hwid,
+                    hardware_id: if instance_id.is_empty() {
+                        hwid
+                    } else {
+                        instance_id
+                    },
+                    ble_mac,
                 });
             }
 
             SetupDiDestroyDeviceInfoList(dev_info);
         }
-        out
+        coalesce_bt_devices(out)
     }
 }
 
@@ -327,7 +452,9 @@ mod tests {
     #[test]
     fn extracts_standard_and_bluetooth_vid_pid() {
         assert_eq!(
-            extract_vid_pid_from_hwid(r"BTHENUM\{00001812-0000-1000-8000-00805f9b34fb}_VID&0002258A_PID&0040"),
+            extract_vid_pid_from_hwid(
+                r"BTHENUM\{00001812-0000-1000-8000-00805f9b34fb}_VID&0002258A_PID&0040"
+            ),
             (Some(0x258A), Some(0x0040))
         );
         assert_eq!(
@@ -338,5 +465,57 @@ mod tests {
             extract_vid_pid_from_hwid(r"BTHENUM\Dev_A4C138112233"),
             (None, None)
         );
+    }
+
+    #[test]
+    fn extracts_ble_mac_from_pnp_and_hid_paths() {
+        assert_eq!(
+            extract_ble_mac(r"BTHLE\DEV_FF0F00191294\B&20345D26&0&FF0F00191294"),
+            Some("FF0F00191294".to_string())
+        );
+        assert_eq!(
+            extract_ble_mac(
+                r"BTHLEDEVICE\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02258A_PID&0040_REV&0300_FF0F00191294\C&3616C6DE&0&001E"
+            ),
+            Some("FF0F00191294".to_string())
+        );
+        assert_eq!(
+            extract_ble_mac(
+                r"\\?\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&02258a_pid&0040_rev&0300_ff0f00191294#c&3616c6de&0&001e"
+            ),
+            Some("FF0F00191294".to_string())
+        );
+        assert_eq!(
+            extract_ble_mac(r"\\?\hid#vid_1d57&pid_fa65&mi_02&col03#a&d41e9db&0&0002"),
+            None
+        );
+    }
+
+    #[test]
+    fn coalesces_sibling_bt_nodes_by_ble_mac() {
+        let raw = vec![
+            WinBluetoothDeviceInfo {
+                name: "K98PRO 5.0".to_string(),
+                vendor_id: None,
+                product_id: None,
+                battery_percent: Some(19),
+                hardware_id: r"BTHLE\DEV_FF0F00191294\B&20345D26&0&FF0F00191294".to_string(),
+                ble_mac: Some("FF0F00191294".to_string()),
+            },
+            WinBluetoothDeviceInfo {
+                name: "符合蓝牙低能耗 GATT 的 HID 设备".to_string(),
+                vendor_id: Some(0x258A),
+                product_id: Some(0x0040),
+                battery_percent: None,
+                hardware_id: r"BTHLEDEVICE\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02258A_PID&0040_REV&0300_FF0F00191294".to_string(),
+                ble_mac: Some("FF0F00191294".to_string()),
+            },
+        ];
+        let merged = coalesce_bt_devices(raw);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "K98PRO 5.0");
+        assert_eq!(merged[0].vendor_id, Some(0x258A));
+        assert_eq!(merged[0].product_id, Some(0x0040));
+        assert_eq!(merged[0].battery_percent, Some(19));
     }
 }

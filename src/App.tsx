@@ -33,6 +33,7 @@ import {
   syncKeyboardHardware,
   syncMouseHardware,
   triggerMacroHardware,
+  type TelemetryEventPayload,
 } from './services/deviceBridge';
 
 const SECTION_BREADCRUMBS: Record<NavSection, string> = {
@@ -105,9 +106,41 @@ export default function App() {
     };
   }, [mergeScannedDevices]);
 
-  // Periodic light battery refresh every 30s in desktop runtime (non-blocking async Rust)
+  // Periodic light battery refresh every 15s + instant passive telemetry listener in desktop runtime
   useEffect(() => {
     if (!isTauriRuntime()) return;
+
+    const handleTelemetry = (ev: Event) => {
+      const detail = (ev as CustomEvent<TelemetryEventPayload>).detail;
+      if (!detail) return;
+      setDevices((prev) =>
+        prev.map((dev) => {
+          if (dev.vendorId !== detail.vendor_id || dev.productId !== detail.product_id) {
+            return dev;
+          }
+          return {
+            ...dev,
+            name: detail.product_name || dev.name,
+            batteryPercent: detail.battery_percent ?? dev.batteryPercent,
+            charging: detail.charging,
+            batterySource:
+              detail.battery_percent !== null ? detail.battery_source : dev.batterySource,
+            firmwareVersion: detail.firmware_version || dev.firmwareVersion,
+          };
+        })
+      );
+      if (typeof detail.active_dpi_stage === 'number') {
+        const stageIdx = detail.active_dpi_stage;
+        setMouseConfig((prev) =>
+          stageIdx >= 0 && stageIdx < prev.dpiStages.length && prev.activeStageIndex !== stageIdx
+            ? { ...prev, activeStageIndex: stageIdx }
+            : prev
+        );
+      }
+    };
+
+    window.addEventListener('lumen-telemetry', handleTelemetry);
+
     const interval = window.setInterval(() => {
       void refreshNativeBatteries().then((updates) => {
         if (updates.length === 0) return;
@@ -118,17 +151,23 @@ export default function App() {
                 (u.vendor_id === dev.vendorId && u.product_id === dev.productId) ||
                 u.product_name === dev.name
             );
-            if (!hit || hit.battery_percent === null) return dev;
+            if (!hit) return dev;
             return {
               ...dev,
-              batteryPercent: hit.battery_percent,
-              batterySource: hit.battery_source,
+              name: hit.product_name || dev.name,
+              batteryPercent: hit.battery_percent ?? dev.batteryPercent,
+              charging: hit.charging || hit.battery_source === 'wired',
+              batterySource: hit.battery_percent !== null ? hit.battery_source : dev.batterySource,
+              firmwareVersion: hit.firmware_version || dev.firmwareVersion,
             };
           })
         );
       });
-    }, 30000);
-    return () => window.clearInterval(interval);
+    }, 15000);
+    return () => {
+      window.removeEventListener('lumen-telemetry', handleTelemetry);
+      window.clearInterval(interval);
+    };
   }, []);
 
   // Debounced auto-persist (450ms) so dragging sliders never blocks UI frames or disk I/O

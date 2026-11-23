@@ -1,17 +1,35 @@
 mod hid_protocol;
+mod protocols;
+mod safety;
+mod telemetry_daemon;
 mod vendor_protocols;
 mod win_battery;
 
 use hidapi::HidApi;
+use protocols::TelemetryEvent;
+use safety::{BackupSnapshot, HardwareSafetyGuard, SafetyStatus};
 use serde::{Deserialize, Serialize};
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Manager;
-use vendor_protocols::{
-    aggregate_real_peripherals, build_inphic_beken_polling_packet, DiscoveredPeripheral,
-};
+use telemetry_daemon::TelemetryCallback;
+use vendor_protocols::{aggregate_real_peripherals, DiscoveredPeripheral};
 use win_battery::query_windows_bluetooth_devices;
+
+fn make_telemetry_callback(app: tauri::AppHandle) -> TelemetryCallback {
+    Arc::new(move |payload: TelemetryEvent| {
+        if let (Some(win), Ok(json)) = (
+            app.get_webview_window("main"),
+            serde_json::to_string(&payload),
+        ) {
+            let js = format!(
+                "window.dispatchEvent(new CustomEvent('lumen-telemetry', {{ detail: {json} }}));"
+            );
+            let _ = win.eval(&js);
+        }
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HidDispatchResult {
@@ -26,10 +44,12 @@ pub struct BatterySnapshot {
     pub product_id: String,
     pub product_name: String,
     pub battery_percent: Option<u8>,
+    pub charging: bool,
     pub battery_source: String,
+    pub firmware_version: Option<String>,
 }
 
-fn portable_data_dir() -> Result<PathBuf, String> {
+pub(crate) fn portable_data_dir() -> Result<PathBuf, String> {
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path
         .parent()
@@ -39,7 +59,7 @@ fn portable_data_dir() -> Result<PathBuf, String> {
     Ok(data_dir)
 }
 
-fn parse_hex_id(raw: &str) -> Option<u16> {
+pub(crate) fn parse_hex_id(raw: &str) -> Option<u16> {
     let trimmed = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
     u16::from_str_radix(trimmed, 16).ok()
 }
@@ -49,43 +69,34 @@ fn dispatch_mouse_blocking(config: serde_json::Value) -> HidDispatchResult {
         .get("pollingRateHz")
         .and_then(|v| v.as_u64())
         .unwrap_or(1000) as u16;
-    let vid_str = config.get("vendorId").and_then(|v| v.as_str());
-    let pid_str = config.get("productId").and_then(|v| v.as_str());
-    let control_path = config.get("vendorControlPath").and_then(|v| v.as_str());
+    let vid = config
+        .get("vendorId")
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_id)
+        .unwrap_or(0);
+    let pid = config
+        .get("productId")
+        .and_then(|v| v.as_str())
+        .and_then(parse_hex_id)
+        .unwrap_or(0);
 
-    // Dedicated Beken / Inphic KP 8K (0x1D57:0xFA65) experimental HID dispatch via locked 0xFF00 path
-    if let (Some(vs), Some(ps)) = (vid_str, pid_str) {
-        if let (Some(0x1D57), Some(0xFA65)) = (parse_hex_id(vs), parse_hex_id(ps)) {
-            let pkt = build_inphic_beken_polling_packet(polling);
-            if let Ok(api) = HidApi::new() {
-                let opened = control_path
-                    .and_then(|p| CString::new(p).ok())
-                    .and_then(|cp| api.open_path(cp.as_c_str()).ok())
-                    .or_else(|| api.open(0x1D57, 0xFA65).ok());
-                if let Some(dev) = opened {
-                    if dev.write(&pkt).is_ok() || dev.send_feature_report(&pkt).is_ok() {
-                        return HidDispatchResult {
-                            dispatched_to_hardware: true,
-                            report_bytes: pkt.to_vec(),
-                            detail: format!("已向 Inphic KP 8K (0x1D57:0xFA65) 下发 {polling}Hz 私有报文"),
-                        };
-                    }
-                }
-            }
+    let payload = polling.to_be_bytes();
+    let report = hid_protocol::build_feature_report(hid_protocol::CMD_SET_POLLING_RATE, &payload);
+
+    if vid != 0 && pid != 0 {
+        if let Err(reason) = HardwareSafetyGuard::check_write_allowed(vid, pid, "mouse_config") {
             return HidDispatchResult {
                 dispatched_to_hardware: false,
-                report_bytes: pkt.to_vec(),
-                detail: "已保存 Inphic KP 8K 调校参数至本地便携配置".to_string(),
+                report_bytes: report.to_vec(),
+                detail: reason,
             };
         }
     }
 
-    let payload = polling.to_be_bytes();
-    let report = hid_protocol::build_feature_report(hid_protocol::CMD_SET_POLLING_RATE, &payload);
     HidDispatchResult {
         dispatched_to_hardware: false,
         report_bytes: report.to_vec(),
-        detail: "已保存鼠标调校参数至便携配置目录".to_string(),
+        detail: "已保存鼠标调校参数至便携配置目录（安全只读遥测阶段）".to_string(),
     }
 }
 
@@ -124,27 +135,60 @@ async fn load_portable_profile() -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn get_safety_status() -> Result<SafetyStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let dir = portable_data_dir()?;
+        Ok(HardwareSafetyGuard::current_status(&dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_readonly_mode(enabled: bool) -> Result<SafetyStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        safety::set_readonly_mode(enabled);
+        let dir = portable_data_dir()?;
+        Ok(HardwareSafetyGuard::current_status(&dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_device_backups(device_key: Option<String>) -> Result<Vec<BackupSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = portable_data_dir()?;
+        Ok(safety::list_backups(&dir, device_key.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Async non-blocking enumeration of real physical Windows peripherals (HID + Bluetooth PnP battery).
 /// Runs strictly inside `spawn_blocking` so WebView2 UI stays 60fps responsive.
 #[tauri::command]
-async fn scan_devices() -> Result<Vec<DiscoveredPeripheral>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn scan_devices(app: tauri::AppHandle) -> Result<Vec<DiscoveredPeripheral>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let bt_devices = query_windows_bluetooth_devices();
         let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
-        Ok(aggregate_real_peripherals(&api, &bt_devices))
+        let cb = make_telemetry_callback(app);
+        Ok(aggregate_real_peripherals(&api, &bt_devices, Some(&cb)))
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 /// Fast non-blocking battery refresh combining Windows native `DEVPKEY_Bluetooth_Battery`
-/// and short-timeout vendor HID probes.
+/// and read-only vendor HID telemetry probes.
 #[tauri::command]
-async fn refresh_device_battery() -> Result<Vec<BatterySnapshot>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn refresh_device_battery(app: tauri::AppHandle) -> Result<Vec<BatterySnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let bt_devices = query_windows_bluetooth_devices();
         let api = HidApi::new().map_err(|e| e.to_string())?;
-        let devices = aggregate_real_peripherals(&api, &bt_devices);
+        let cb = make_telemetry_callback(app);
+        let devices = aggregate_real_peripherals(&api, &bt_devices, Some(&cb));
         Ok(devices
             .into_iter()
             .map(|d| BatterySnapshot {
@@ -152,7 +196,9 @@ async fn refresh_device_battery() -> Result<Vec<BatterySnapshot>, String> {
                 product_id: d.product_id,
                 product_name: d.product_name,
                 battery_percent: d.battery_percent,
+                charging: d.charging,
                 battery_source: d.battery_source,
+                firmware_version: d.firmware_version,
             })
             .collect())
     })
@@ -238,6 +284,9 @@ pub fn run() {
             get_portable_config_path,
             save_portable_profile,
             load_portable_profile,
+            get_safety_status,
+            set_readonly_mode,
+            list_device_backups,
             scan_devices,
             refresh_device_battery,
             apply_mouse_config,

@@ -134,10 +134,14 @@ interface NativeDiscoveredPeripheral {
   interface_number: number;
   device_path: string;
   vendor_control_path: string | null;
+  telemetry_path: string | null;
+  led_path: string | null;
   protocol: '2.4g' | 'bluetooth' | 'usb';
   category: 'mouse' | 'keyboard' | 'headset';
   battery_percent: number | null;
+  charging: boolean;
   battery_source: BatterySource;
+  firmware_version: string | null;
   protocol_support: ProtocolSupportLevel;
   protocol_note: string;
   max_polling_hz: number;
@@ -148,7 +152,36 @@ export interface NativeBatterySnapshot {
   product_id: string;
   product_name: string;
   battery_percent: number | null;
+  charging: boolean;
   battery_source: BatterySource;
+  firmware_version: string | null;
+}
+
+export interface TelemetryEventPayload {
+  vendor_id: string;
+  product_id: string;
+  product_name: string;
+  battery_percent: number | null;
+  charging: boolean;
+  battery_source: BatterySource;
+  firmware_version: string | null;
+  active_dpi_stage: number | null;
+  model_id: number | null;
+}
+
+export interface SafetyStatus {
+  readonly_mode: boolean;
+  blocked_vendors: string[];
+  backup_count: number;
+}
+
+export interface BackupSnapshot {
+  id: string;
+  device_key: string;
+  category: string;
+  created_at_ms: number;
+  source: string;
+  payload: unknown;
 }
 
 const IMAGE_BY_CATEGORY = {
@@ -186,11 +219,13 @@ export async function scanNativeWindowsDevices(): Promise<PeripheralDevice[]> {
         connected: true,
         batteryPercent: d.battery_percent,
         batterySource: d.battery_source,
-        charging: d.battery_source === 'wired',
-        firmwareVersion: d.protocol === 'bluetooth' ? 'BT-PNP' : 'WIN-HID',
+        charging: d.charging || d.battery_source === 'wired',
+        firmwareVersion: d.firmware_version || (d.protocol === 'bluetooth' ? 'BT-PNP' : 'WIN-HID'),
         vendorId: d.vendor_id,
         productId: d.product_id,
         vendorControlPath: d.vendor_control_path,
+        telemetryPath: d.telemetry_path,
+        ledPath: d.led_path,
         protocolSupport: d.protocol_support,
         protocolNote: d.protocol_note,
         pollingRateHz: d.max_polling_hz || 1000,
@@ -206,6 +241,21 @@ export async function scanNativeWindowsDevices(): Promise<PeripheralDevice[]> {
 export async function refreshNativeBatteries(): Promise<NativeBatterySnapshot[]> {
   if (!isTauriRuntime()) return [];
   const res = await invokeNativeCommand<NativeBatterySnapshot[]>('refresh_device_battery');
+  return res ?? [];
+}
+
+export async function getSafetyStatus(): Promise<SafetyStatus | null> {
+  return invokeNativeCommand<SafetyStatus>('get_safety_status');
+}
+
+export async function setReadonlyMode(enabled: boolean): Promise<SafetyStatus | null> {
+  return invokeNativeCommand<SafetyStatus>('set_readonly_mode', { enabled });
+}
+
+export async function listDeviceBackups(deviceKey?: string): Promise<BackupSnapshot[]> {
+  const res = await invokeNativeCommand<BackupSnapshot[]>('list_device_backups', {
+    deviceKey: deviceKey ?? null,
+  });
   return res ?? [];
 }
 

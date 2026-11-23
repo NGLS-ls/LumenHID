@@ -74,6 +74,7 @@ const EXTERNAL_PERIPHERAL_ALLOWLIST = [
   'leobog',
   '凌豹',
   'sinowealth',
+  'sino wealth',
   'logitech',
   'razer',
   'steelseries',
@@ -124,48 +125,51 @@ export function classifyKnownPeripheral(
   const pid = productId.toUpperCase();
   const lower = rawName.toLowerCase();
 
-  if ((vid === '0X1D57' && pid === '0XFA65') || (lower.includes('inphic') && lower.includes('kp'))) {
+  if ((vid === '0X1D57' && pid === '0XFA65') || (lower.includes('inphic') && (lower.includes('kp') || lower.includes('in10')))) {
     return {
-      displayName: 'Inphic KP 8K',
+      displayName: 'Inphic IN10 / KP 8K',
       manufacturer: '英菲克 Inphic',
       category: 'mouse',
-      protocolSupport: 'native-battery-experimental-tuning',
+      protocolSupport: 'native-full',
       protocolNote:
-        '已识别英菲克 KP 8K (0x1D57:0xFA65)；已锁定 0xFF00 私有通道读取电量，DPI/回报率采用 Beken 私有报文试验下发。',
+        '已识别英菲克 IN10 / KP 8K (0x1D57:0xFA65)；已锁定 MI_02&COL03 遥测通道读取实时电量，并通过 MI_02&COL04 (64B 0x04 协议 + 双 ACK) 安全调校。',
       maxPollingHz: 8000,
     };
   }
 
   if (
-    (vid === '0X258A' && pid === '0X0040') ||
+    (vid === '0X258A' && (pid === '0X0040' || pid === '0X019D')) ||
     lower.includes('k98pro') ||
     lower.includes('k98 pro') ||
     lower.includes('leobog')
   ) {
     return {
-      displayName: '凌豹 K98PRO 5.0',
+      displayName: pid === '0X019D' ? '凌豹 K98PRO (USB/2.4G)' : '凌豹 K98PRO 5.0',
       manufacturer: '凌豹 / Sinowealth',
       category: 'keyboard',
-      protocolSupport: 'native-battery-readonly',
+      protocolSupport: 'soft-driver-safe',
       protocolNote:
-        '已识别凌豹 K98PRO 5.0 (中颖 0x258A:0x0040)；电量通过 Windows 蓝牙属性或只读 HID 实时获取。为防止误写 Flash 分区导致键盘锁死，且蓝牙 HOGP 通道不支持写入，当前保持只读安全模式。',
+        '已识别凌豹 K98PRO (中颖方案)；电量通过 Windows 蓝牙 BLE MAC 实时获取。为严防中颖 Flash 盲写变砖，常用改键/宏/SOCD/锁Win 均由软驱动安全接管。',
       maxPollingHz: 1000,
     };
   }
 
   if (
+    (vid === '0X35BB' && (pid === '0XA00B' || pid === '0XA211')) ||
     lower.includes('g5 max') ||
     lower.includes('g5max') ||
     (lower.includes('hecate') && lower.includes('g5')) ||
     (lower.includes('edifier') && lower.includes('g5'))
   ) {
+    const isNativeHid = vid === '0X35BB';
     return {
-      displayName: '漫步者 HECATE G5 Max',
+      displayName: pid === '0XA211' ? '漫步者 HECATE G5 Max 有线版' : pid === '0XA00B' ? '漫步者 HECATE G5 Max 无线版' : '漫步者 HECATE G5 Max',
       manufacturer: '漫步者 Edifier HECATE',
       category: 'headset',
-      protocolSupport: 'system-apo',
-      protocolNote:
-        '已识别漫步者 HECATE G5 Max；蓝牙模式支持原生实时电量显示。其板载 DSP EQ 属闭源加密协议，请使用「导出 EqualizerAPO 配置」在 Windows 全局无损生效 10 段 EQ。',
+      protocolSupport: isNativeHid ? 'native-full' : 'system-apo',
+      protocolNote: isNativeHid
+        ? '已识别漫步者 HECATE G5 Max；已直连 HID 状态通道读取实时电量与固件版本，10 段 EQ 与 THX 空间音效可直连本机 THX 服务。'
+        : '已识别漫步者 HECATE G5 Max；蓝牙模式支持原生实时电量显示，并支持导出 EqualizerAPO 全局 10 段 EQ。',
       maxPollingHz: 1000,
     };
   }
