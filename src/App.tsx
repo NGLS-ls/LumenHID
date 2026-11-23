@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Menu, Save } from 'lucide-react';
+import { Lock, Menu, Save, Unlock } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { DevicesView } from './components/DevicesView';
 import { MouseView } from './components/MouseView';
@@ -27,6 +27,7 @@ import {
   downloadTextFile,
   emergencyResetKeyboardEngine,
   getKeyboardEngineStatus,
+  getSafetyStatus,
   getThxStatus,
   isTauriRuntime,
   loadSavedProfile,
@@ -37,12 +38,14 @@ import {
   saveProfileSnapshot,
   scanNativeWindowsDevices,
   setKeyboardEngineEnabled,
+  setReadonlyMode,
   syncAudioHardware,
   syncKeyboardHardware,
   syncMacrosToEngine,
   syncMouseHardware,
   triggerMacroHardware,
   type KeyboardEngineStatus,
+  type SafetyStatus,
   type TelemetryEventPayload,
   type ThxStatus,
 } from './services/deviceBridge';
@@ -86,6 +89,7 @@ export default function App() {
     null
   );
   const [thxStatus, setThxStatus] = useState<ThxStatus | null>(null);
+  const [safetyStatus, setSafetyStatus] = useState<SafetyStatus | null>(null);
   const saveTimerRef = useRef<number | null>(null);
 
   const showNotice = useCallback((msg: string) => {
@@ -127,12 +131,20 @@ export default function App() {
     void syncMacrosToEngine(macros);
   }, [macros]);
 
+  const refreshSafetyStatus = useCallback(() => {
+    if (!isTauriRuntime()) return;
+    void getSafetyStatus().then((st) => {
+      if (st) setSafetyStatus(st);
+    });
+  }, []);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     void getThxStatus().then((st) => {
       if (st) setThxStatus(st);
     });
-  }, [activeSection]);
+    refreshSafetyStatus();
+  }, [activeSection, refreshSafetyStatus]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -329,6 +341,20 @@ export default function App() {
       void getKeyboardEngineStatus().then((st) => {
         if (st) setKeyboardEngineStatus(st);
       });
+      refreshSafetyStatus();
+    });
+  };
+
+  const handleToggleReadonlyMode = (enabled: boolean) => {
+    void setReadonlyMode(enabled).then((st) => {
+      if (st) {
+        setSafetyStatus(st);
+        showNotice(
+          st.readonly_mode
+            ? '已开启全局只读安全模式：所有硬件写操作、THX 写入与键盘拦截均已锁定'
+            : '已解除只读安全模式：已放行白名单设备的防变砖安全写通道'
+        );
+      }
     });
   };
 
@@ -366,7 +392,9 @@ export default function App() {
 
   const handleAudioChange = (next: AudioConfig) => {
     setAudioConfig(next);
-    syncAudioHardware(next, headsetDevice);
+    syncAudioHardware(next, headsetDevice, () => {
+      refreshSafetyStatus();
+    });
   };
 
   const handleRollbackAudio = () => {
@@ -445,12 +473,16 @@ export default function App() {
       if (activeSection === 'mouse') {
         showNotice(res.detail);
       }
+      refreshSafetyStatus();
     });
-    syncKeyboardHardware(keyboardConfig, keyboardDevice);
+    void syncKeyboardHardware(keyboardConfig, keyboardDevice).then(() => {
+      refreshSafetyStatus();
+    });
     syncAudioHardware(audioConfig, headsetDevice, (res) => {
       if (activeSection === 'audio') {
         showNotice(res.detail);
       }
+      refreshSafetyStatus();
     });
     const snapshot: AppProfileSnapshot = {
       schemaVersion: '2.0.0',
@@ -500,14 +532,36 @@ export default function App() {
             </nav>
           </div>
 
-          <button
-            type="button"
-            onClick={handleWriteToHardware}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#181C20] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#2C333B] transition-colors whitespace-nowrap shrink-0"
-          >
-            <Save className="h-3.5 w-3.5" />
-            <span>保存并下发配置</span>
-          </button>
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(safetyStatus?.readonly_mode)}
+              onClick={() => handleToggleReadonlyMode(!safetyStatus?.readonly_mode)}
+              className={`hidden sm:inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                safetyStatus?.readonly_mode
+                  ? 'border-[#D97706] bg-[#FEF3C7] text-[#92400E] hover:bg-[#FDE68A]'
+                  : 'border-[#DCE5E4] bg-white text-[#1D4E4C] hover:bg-[#EBF3F2]'
+              }`}
+              title="随时开启以全局禁止硬件写指令"
+            >
+              {safetyStatus?.readonly_mode ? (
+                <Lock className="h-3.5 w-3.5" />
+              ) : (
+                <Unlock className="h-3.5 w-3.5" />
+              )}
+              <span>{safetyStatus?.readonly_mode ? '只读安全锁定' : '只读安全锁'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleWriteToHardware}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#181C20] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#2C333B] transition-colors whitespace-nowrap shrink-0"
+            >
+              <Save className="h-3.5 w-3.5" />
+              <span>保存并下发配置</span>
+            </button>
+          </div>
         </header>
 
         <main className="mx-auto w-full max-w-[1220px] flex-1 px-4 py-6 sm:px-8 sm:py-8">
@@ -517,6 +571,8 @@ export default function App() {
                 devices={devices}
                 activeDeviceId={activeDeviceId}
                 scanning={scanning}
+                safetyStatus={safetyStatus}
+                keyboardEngineStatus={keyboardEngineStatus}
                 onSelectDeviceAndOpen={(dev, sec) => {
                   setActiveDeviceId(dev.id);
                   setActiveSection(sec);
@@ -525,6 +581,8 @@ export default function App() {
                 onMergeScannedDevices={mergeScannedDevices}
                 onExportProfile={handleExportProfile}
                 onImportProfile={handleImportProfile}
+                onToggleReadonlyMode={handleToggleReadonlyMode}
+                onEmergencyStopKeyboard={handleEmergencyStopKeyboard}
               />
             )}
 

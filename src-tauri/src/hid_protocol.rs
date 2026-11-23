@@ -2,6 +2,7 @@
 /// Layout: [0x08 ReportID, CommandID, PayloadLen, Payload[0..12], XOR Checksum]
 pub const REPORT_ID_CONFIG: u8 = 0x08;
 
+#[allow(dead_code)]
 pub const CMD_SET_MOUSE_DPI: u8 = 0x21;
 pub const CMD_SET_POLLING_RATE: u8 = 0x22;
 pub const CMD_SET_KEYBOARD_ACTUATION: u8 = 0x31;

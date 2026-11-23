@@ -7,11 +7,14 @@ import {
   Headphones,
   Keyboard,
   Loader2,
+  Lock,
   Mouse,
   Radar,
   Radio,
   RefreshCw,
   Search,
+  ShieldAlert,
+  ShieldCheck,
   Upload,
   Usb,
   X,
@@ -25,17 +28,27 @@ import type {
   ProtocolFilter,
 } from '../types/peripheral';
 import { filterDevices } from '../utils/deviceEngine';
-import { isTauriRuntime, scanRealDevices, supportsWebHid } from '../services/deviceBridge';
+import {
+  isTauriRuntime,
+  scanRealDevices,
+  supportsWebHid,
+  type KeyboardEngineStatus,
+  type SafetyStatus,
+} from '../services/deviceBridge';
 
 interface DevicesViewProps {
   devices: PeripheralDevice[];
   activeDeviceId: string;
   scanning: boolean;
+  safetyStatus?: SafetyStatus | null;
+  keyboardEngineStatus?: KeyboardEngineStatus | null;
   onSelectDeviceAndOpen: (device: PeripheralDevice, section: NavSection) => void;
   onRefreshDevices: () => Promise<void>;
   onMergeScannedDevices: (found: PeripheralDevice[]) => void;
   onExportProfile: () => void;
   onImportProfile: (rawJson: string) => { ok: boolean; message: string };
+  onToggleReadonlyMode?: (enabled: boolean) => void;
+  onEmergencyStopKeyboard?: () => void;
 }
 
 const PROTOCOL_FILTERS: { id: ProtocolFilter; label: string }[] = [
@@ -115,11 +128,15 @@ export function DevicesView({
   devices,
   activeDeviceId,
   scanning,
+  safetyStatus,
+  keyboardEngineStatus,
   onSelectDeviceAndOpen,
   onRefreshDevices,
   onMergeScannedDevices,
   onExportProfile,
   onImportProfile,
+  onToggleReadonlyMode,
+  onEmergencyStopKeyboard,
 }: DevicesViewProps) {
   const [protocolFilter, setProtocolFilter] = useState<ProtocolFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -454,6 +471,84 @@ export function DevicesView({
           </div>
         </div>
       </div>
+
+      {/* Global Anti-Brick Safety Guard & Rollback Panel */}
+      <section className="rounded-2xl border border-[#DCE5E4] bg-white p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#EBF3F2] text-[#1D4E4C]">
+              <ShieldCheck className="h-4.5 w-4.5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold text-[#181C20]">防变砖安全护栏与回滚状态</h2>
+                <span
+                  className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                    safetyStatus?.readonly_mode
+                      ? 'bg-[#FEF3C7] text-[#92400E]'
+                      : 'bg-[#EBF3F2] text-[#1D4E4C]'
+                  }`}
+                >
+                  {safetyStatus?.readonly_mode ? '全局只读锁已开启' : '白名单安全直写 + 写前快照保护'}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-[#586370]">
+                永久拦截中颖 0x258A 未知 Flash 与高危 OTA/Bootloader 指令；支持双 ACK 失败即中止，自动保存{' '}
+                <span className="font-mono font-medium text-[#181C20]">
+                  {safetyStatus?.backup_count ?? 0}
+                </span>{' '}
+                份原子回滚快照至便携目录 <span className="font-mono">LumenHID.data/backups/</span>。
+              </p>
+              {safetyStatus && safetyStatus.blocked_vendors.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {safetyStatus.blocked_vendors.map((v) => (
+                    <span
+                      key={v}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#E5E9EE] bg-[#FAFBFD] px-2 py-0.5 font-mono text-[11px] text-[#586370]"
+                    >
+                      <Lock className="h-3 w-3 text-[#2B6B68]" />
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onToggleReadonlyMode && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(safetyStatus?.readonly_mode)}
+                onClick={() => onToggleReadonlyMode(!safetyStatus?.readonly_mode)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                  safetyStatus?.readonly_mode
+                    ? 'border-[#D97706] bg-[#FEF3C7] text-[#92400E] hover:bg-[#FDE68A]'
+                    : 'border-[#C4DCD9] bg-[#EBF3F2] text-[#1D4E4C] hover:bg-[#DCEBE9]'
+                }`}
+              >
+                <Lock className="h-3.5 w-3.5" />
+                <span>{safetyStatus?.readonly_mode ? '解除只读安全锁' : '开启全局只读安全模式'}</span>
+              </button>
+            )}
+
+            {onEmergencyStopKeyboard && (
+              <button
+                type="button"
+                onClick={onEmergencyStopKeyboard}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs font-medium text-[#B91C1C] hover:bg-[#FEE2E2] transition-colors whitespace-nowrap"
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                <span>
+                  紧急停用键盘软驱动 (Ctrl+Alt+Esc
+                  {keyboardEngineStatus?.hook_installed ? ' · 运行中' : ''})
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Device Grid or Clean Real-Hardware Empty State */}
       {devices.length === 0 ? (
