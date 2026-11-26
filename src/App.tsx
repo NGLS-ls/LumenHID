@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Lock, Menu, Save, Unlock } from 'lucide-react';
+import { ArrowUpCircle, Lock, Menu, Save, Unlock } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { DevicesView } from './components/DevicesView';
 import { MouseView } from './components/MouseView';
 import { KeyboardView } from './components/KeyboardView';
 import { MacroStudioView } from './components/MacroStudioView';
 import { AudioStudioView } from './components/AudioStudioView';
+import { UpdateModal } from './components/UpdateModal';
 import {
   DEFAULT_AUDIO_CONFIG,
   DEFAULT_KEYBOARD_CONFIG,
@@ -24,18 +25,23 @@ import type {
 import { parseAndValidateProfile, serializeProfile } from './utils/deviceEngine';
 import {
   applyHeadsetLed,
+  checkAppUpdate,
+  downloadAndApplyUpdate,
   downloadTextFile,
   emergencyResetKeyboardEngine,
   getKeyboardEngineStatus,
   getSafetyStatus,
   getThxStatus,
+  getUpdaterSettings,
   isTauriRuntime,
   loadSavedProfile,
+  openExternalUrl,
   refreshNativeBatteries,
   rollbackAudioConfig,
   rollbackKeyboardConfig,
   rollbackMouseConfig,
   saveProfileSnapshot,
+  saveUpdaterSettings,
   scanNativeWindowsDevices,
   setKeyboardEngineEnabled,
   setReadonlyMode,
@@ -48,6 +54,9 @@ import {
   type SafetyStatus,
   type TelemetryEventPayload,
   type ThxStatus,
+  type UpdateCheckResult,
+  type UpdateProgressPayload,
+  type UpdaterSettingsView,
 } from './services/deviceBridge';
 
 const SECTION_BREADCRUMBS: Record<NavSection, string> = {
@@ -90,6 +99,13 @@ export default function App() {
   );
   const [thxStatus, setThxStatus] = useState<ThxStatus | null>(null);
   const [safetyStatus, setSafetyStatus] = useState<SafetyStatus | null>(null);
+  const [updaterSettings, setUpdaterSettings] = useState<UpdaterSettingsView | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updatingApp, setUpdatingApp] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgressPayload | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const saveTimerRef = useRef<number | null>(null);
 
   const showNotice = useCallback((msg: string) => {
@@ -145,6 +161,95 @@ export default function App() {
     });
     refreshSafetyStatus();
   }, [activeSection, refreshSafetyStatus]);
+
+  const handleCheckUpdate = useCallback(async (silent = false) => {
+    if (!isTauriRuntime()) {
+      if (!silent) {
+        setUpdateError('当前处于 Web 预览模式，请在 Windows 桌面端运行在线更新检查');
+      }
+      return;
+    }
+    setCheckingUpdate(true);
+    setUpdateError(null);
+    const res = await checkAppUpdate();
+    setCheckingUpdate(false);
+    if (res.ok) {
+      setUpdateInfo(res.data);
+      if (!silent && !res.data.has_update) {
+        showNotice(res.data.detail);
+      }
+    } else {
+      setUpdateError(res.error);
+      if (!silent) {
+        showNotice(res.error);
+      }
+    }
+  }, [showNotice]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void getUpdaterSettings().then((st) => {
+      if (st) setUpdaterSettings(st);
+    });
+    void handleCheckUpdate(true);
+
+    const onUpdateProgress = (ev: Event) => {
+      const detail = (ev as CustomEvent<UpdateProgressPayload>).detail;
+      if (detail) {
+        setUpdateProgress(detail);
+      }
+    };
+    window.addEventListener('lumen-update-progress', onUpdateProgress);
+    return () => {
+      window.removeEventListener('lumen-update-progress', onUpdateProgress);
+    };
+  }, [handleCheckUpdate]);
+
+  const handleApplyUpdate = async () => {
+    if (!updateInfo) return;
+    setUpdatingApp(true);
+    setUpdateError(null);
+    setUpdateProgress({
+      stage: 'downloading',
+      downloaded_bytes: 0,
+      total_bytes: updateInfo.asset_size,
+      percent: 0,
+      message: '正在准备下载安装包...',
+    });
+
+    const res = await downloadAndApplyUpdate(updateInfo);
+    setUpdatingApp(false);
+    if (res.ok) {
+      showNotice(res.data.detail);
+    } else {
+      setUpdateError(res.error);
+      showNotice(res.error);
+    }
+  };
+
+  const handleSaveUpdaterSettings = async (
+    repo: string,
+    token: string | null,
+    clearToken: boolean
+  ): Promise<boolean> => {
+    const res = await saveUpdaterSettings(repo, token, clearToken);
+    if (res.ok) {
+      setUpdaterSettings(res.data);
+      setUpdateError(null);
+      showNotice('已保存 GitHub 更新源设置');
+      return true;
+    }
+    setUpdateError(res.error);
+    return false;
+  };
+
+  const handleOpenReleaseUrl = (url: string) => {
+    void openExternalUrl(url).then((res) => {
+      if (!res.ok) {
+        showNotice(res.error);
+      }
+    });
+  };
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -508,6 +613,15 @@ export default function App() {
         onSelectDevice={handleSelectDevice}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
+        appVersion={updateInfo?.current_version ?? updaterSettings?.current_version}
+        updateInfo={updateInfo}
+        checkingUpdate={checkingUpdate}
+        onOpenUpdateModal={() => {
+          setUpdateModalOpen(true);
+          if (!updateInfo && !checkingUpdate) {
+            void handleCheckUpdate(false);
+          }
+        }}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -533,6 +647,22 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
+            {updateInfo?.has_update && (
+              <button
+                type="button"
+                onClick={() => setUpdateModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#C4DCD9] bg-[#EBF3F2] px-3 py-2 text-xs font-medium text-[#1D4E4C] hover:bg-[#DCEBE9] transition-colors whitespace-nowrap shrink-0"
+                title={updateInfo.detail}
+              >
+                <ArrowUpCircle className="h-3.5 w-3.5 text-[#2B6B68]" />
+                <span>
+                  {updatingApp && updateProgress
+                    ? `升级中 ${updateProgress.percent}%`
+                    : `升级到 v${updateInfo.latest_version ?? updateInfo.tag_name ?? ''}`}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               role="switch"
@@ -651,6 +781,23 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      <UpdateModal
+        open={updateModalOpen}
+        onClose={() => {
+          if (!updatingApp) setUpdateModalOpen(false);
+        }}
+        settings={updaterSettings}
+        updateInfo={updateInfo}
+        checking={checkingUpdate}
+        updating={updatingApp}
+        progress={updateProgress}
+        errorMessage={updateError}
+        onCheckNow={() => void handleCheckUpdate(false)}
+        onApplyUpdate={() => void handleApplyUpdate()}
+        onSaveSettings={handleSaveUpdaterSettings}
+        onOpenReleaseUrl={handleOpenReleaseUrl}
+      />
 
       {notice && (
         <div

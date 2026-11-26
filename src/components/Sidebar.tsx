@@ -1,4 +1,5 @@
 import {
+  ArrowUpCircle,
   Cpu,
   Headphones,
   Keyboard,
@@ -7,6 +8,7 @@ import {
   X,
 } from 'lucide-react';
 import type { NavSection, PeripheralDevice } from '../types/peripheral';
+import type { UpdateCheckResult } from '../services/deviceBridge';
 
 interface SidebarProps {
   activeSection: NavSection;
@@ -16,6 +18,10 @@ interface SidebarProps {
   onSelectDevice: (device: PeripheralDevice) => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
+  appVersion?: string;
+  updateInfo?: UpdateCheckResult | null;
+  checkingUpdate?: boolean;
+  onOpenUpdateModal?: () => void;
 }
 
 const NAV_ITEMS: { id: NavSection; label: string; icon: typeof Cpu }[] = [
@@ -46,6 +52,10 @@ export function Sidebar({
   onSelectDevice,
   mobileOpen,
   onCloseMobile,
+  appVersion,
+  updateInfo,
+  checkingUpdate,
+  onOpenUpdateModal,
 }: SidebarProps) {
   const navContent = (
     <div className="flex h-full flex-col bg-white border-r border-[#E5E9EE]">
@@ -149,9 +159,32 @@ export function Sidebar({
       </nav>
 
       <div className="border-t border-[#E5E9EE] px-5 py-3.5 text-xs text-[#84909D]">
-        <div className="flex items-center justify-between">
-          <span>免安装便携配置</span>
-          <span className="font-mono tabular-nums text-[#586370]">v2.0.0</span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-mono tabular-nums text-[#586370]">
+            v{appVersion ?? '1.0.0'}
+          </span>
+          {onOpenUpdateModal ? (
+            <button
+              type="button"
+              onClick={onOpenUpdateModal}
+              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                updateInfo?.has_update
+                  ? 'bg-[#EBF3F2] text-[#1D4E4C] hover:bg-[#DCEBE9]'
+                  : 'text-[#586370] hover:bg-[#F0F3F6] hover:text-[#181C20]'
+              }`}
+            >
+              {updateInfo?.has_update && <ArrowUpCircle className="h-3 w-3 text-[#2B6B68]" />}
+              <span>
+                {checkingUpdate
+                  ? '检查中...'
+                  : updateInfo?.has_update && updateInfo.latest_version
+                  ? `升级 v${updateInfo.latest_version}`
+                  : '检查更新'}
+              </span>
+            </button>
+          ) : (
+            <span>免安装便携版</span>
+          )}
         </div>
       </div>
     </div>

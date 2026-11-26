@@ -666,3 +666,81 @@ export class AudioPreviewEngine {
     }
   }
 }
+
+export interface UpdaterSettingsView {
+  current_version: string;
+  repo: string;
+  has_token: boolean;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string | null;
+  tag_name: string | null;
+  has_update: boolean;
+  repo: string;
+  has_token: boolean;
+  release_title: string | null;
+  release_notes: string | null;
+  release_url: string | null;
+  published_at: string | null;
+  asset_name: string | null;
+  asset_size: number | null;
+  download_url: string | null;
+  api_asset_url: string | null;
+  checksum_url: string | null;
+  checksum_api_url: string | null;
+  auth_required: boolean;
+  detail: string;
+}
+
+export interface UpdateProgressPayload {
+  stage: 'downloading' | 'verifying' | 'applying' | 'ready_dev' | 'error';
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  percent: number;
+  message: string;
+}
+
+export interface UpdateApplyResult {
+  will_restart: boolean;
+  staged_path: string;
+  detail: string;
+}
+
+export async function getUpdaterSettings(): Promise<UpdaterSettingsView | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<UpdaterSettingsView>('get_updater_settings');
+}
+
+export async function saveUpdaterSettings(
+  repo: string,
+  githubToken: string | null,
+  clearToken: boolean
+): Promise<{ ok: true; data: UpdaterSettingsView } | { ok: false; error: string }> {
+  return invokeNativeResult<UpdaterSettingsView>('save_updater_settings', {
+    repo,
+    githubToken,
+    clearToken,
+  });
+}
+
+export async function checkAppUpdate(): Promise<
+  { ok: true; data: UpdateCheckResult } | { ok: false; error: string }
+> {
+  return invokeNativeResult<UpdateCheckResult>('check_app_update');
+}
+
+export async function downloadAndApplyUpdate(
+  update: UpdateCheckResult
+): Promise<{ ok: true; data: UpdateApplyResult } | { ok: false; error: string }> {
+  return invokeNativeResult<UpdateApplyResult>('download_and_apply_update', {
+    update,
+  });
+}
+
+export async function openExternalUrl(
+  url: string
+): Promise<{ ok: true; data: null } | { ok: false; error: string }> {
+  return invokeNativeResult<null>('open_external_url', { url });
+}

@@ -3,6 +3,7 @@ mod keyboard_engine;
 mod protocols;
 mod safety;
 mod telemetry_daemon;
+mod updater;
 mod vendor_protocols;
 mod win_battery;
 
@@ -684,6 +685,93 @@ async fn execute_macro(macro_def: serde_json::Value) -> Result<usize, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn get_updater_settings() -> Result<updater::UpdaterSettingsView, String> {
+    let dir = tauri::async_runtime::spawn_blocking(portable_data_dir)
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(updater::get_updater_settings(&dir))
+}
+
+#[tauri::command]
+async fn save_updater_settings(
+    repo: String,
+    github_token: Option<String>,
+    clear_token: bool,
+) -> Result<updater::UpdaterSettingsView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = portable_data_dir()?;
+        updater::save_updater_settings(&dir, &repo, github_token, clear_token)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn check_app_update() -> Result<updater::UpdateCheckResult, String> {
+    let dir = tauri::async_runtime::spawn_blocking(portable_data_dir)
+        .await
+        .map_err(|e| e.to_string())??;
+    updater::check_for_update(&dir).await
+}
+
+#[tauri::command]
+async fn download_and_apply_update(
+    app: tauri::AppHandle,
+    update: updater::UpdateCheckResult,
+) -> Result<updater::UpdateApplyResult, String> {
+    let dir = tauri::async_runtime::spawn_blocking(portable_data_dir)
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let app_for_cb = app.clone();
+    let cb: updater::ProgressCallback = Arc::new(move |progress: updater::UpdateProgress| {
+        if let (Some(win), Ok(json)) = (
+            app_for_cb.get_webview_window("main"),
+            serde_json::to_string(&progress),
+        ) {
+            let js = format!(
+                "window.dispatchEvent(new CustomEvent('lumen-update-progress', {{ detail: {json} }}));"
+            );
+            let _ = win.eval(&js);
+        }
+    });
+
+    let res = updater::download_and_apply_update(&dir, &update, Some(cb)).await?;
+    if res.will_restart {
+        let app_for_exit = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            app_for_exit.exit(0);
+        });
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim().to_string();
+    if !trimmed.starts_with("https://github.com/") {
+        return Err("安全护栏拦截：仅允许打开 https://github.com/ 链接".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &trimmed])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("打开外部浏览器失败: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = trimmed;
+        Err("当前平台不支持打开外部浏览器".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -733,6 +821,11 @@ pub fn run() {
             rollback_audio_config,
             apply_headset_led,
             execute_macro,
+            get_updater_settings,
+            save_updater_settings,
+            check_app_update,
+            download_and_apply_update,
+            open_external_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building LumenHID Tauri application");
