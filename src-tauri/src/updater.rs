@@ -325,14 +325,49 @@ fn ensure_crypto_provider() {
     });
 }
 
+/// Walks the `std::error::Error::source()` chain so transport failures reveal their root cause.
+pub fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(src) = current {
+        let msg = src.to_string();
+        if !parts.last().is_some_and(|prev| prev == &msg) {
+            parts.push(msg);
+        }
+        current = src.source();
+    }
+    parts.join(" -> ")
+}
+
 fn build_http_client(timeout: Duration) -> Result<reqwest::Client, String> {
     ensure_crypto_provider();
     reqwest::Client::builder()
         .user_agent(format!("LumenHID/{CURRENT_APP_VERSION}"))
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(15))
         .timeout(timeout)
+        .pool_max_idle_per_host(0)
         .build()
-        .map_err(|e| format!("初始化 HTTPS 客户端失败: {e}"))
+        .map_err(|e| format!("初始化 HTTPS 客户端失败: {}", format_error_chain(&e)))
+}
+
+async fn send_get_with_retry<F>(make_req: F, label: &str) -> Result<reqwest::Response, String>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let backoffs_ms = [500u64, 1200u64];
+    for attempt in 0..=backoffs_ms.len() {
+        match make_req().send().await {
+            Ok(resp) => return Ok(resp),
+            Err(err) => {
+                if let Some(&delay_ms) = backoffs_ms.get(attempt) {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                } else {
+                    return Err(format!("{label}: {}", format_error_chain(&err)));
+                }
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn apply_github_api_headers(
@@ -350,20 +385,21 @@ fn apply_github_api_headers(
 
 pub async fn check_for_update(data_dir: &Path) -> Result<UpdateCheckResult, String> {
     let (repo, token) = load_effective_config(data_dir);
-    let client = build_http_client(Duration::from_secs(15))?;
+    let client = build_http_client(Duration::from_secs(25))?;
 
     let latest_url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let resp = apply_github_api_headers(client.get(&latest_url), token.as_deref())
-        .send()
-        .await
-        .map_err(|e| format!("请求 GitHub 更新检查失败: {e}"))?;
+    let resp = send_get_with_retry(
+        || apply_github_api_headers(client.get(&latest_url), token.as_deref()),
+        "请求 GitHub 更新检查失败",
+    )
+    .await?;
 
     let status = resp.status();
     let release_opt: Option<GitHubRelease> = if status.is_success() {
         let rel = resp
             .json::<GitHubRelease>()
             .await
-            .map_err(|e| format!("解析 GitHub Release JSON 失败: {e}"))?;
+            .map_err(|e| format!("解析 GitHub Release JSON 失败: {}", format_error_chain(&e)))?;
         if rel.draft {
             None
         } else {
@@ -371,16 +407,17 @@ pub async fn check_for_update(data_dir: &Path) -> Result<UpdateCheckResult, Stri
         }
     } else if status == reqwest::StatusCode::NOT_FOUND {
         let list_url = format!("https://api.github.com/repos/{repo}/releases?per_page=5");
-        let list_resp = apply_github_api_headers(client.get(&list_url), token.as_deref())
-            .send()
-            .await
-            .map_err(|e| format!("回退查询 GitHub Releases 列表失败: {e}"))?;
+        let list_resp = send_get_with_retry(
+            || apply_github_api_headers(client.get(&list_url), token.as_deref()),
+            "回退查询 GitHub Releases 列表失败",
+        )
+        .await?;
         let list_status = list_resp.status();
         if list_status.is_success() {
             let list = list_resp
                 .json::<Vec<GitHubRelease>>()
                 .await
-                .map_err(|e| format!("解析 Releases 列表失败: {e}"))?;
+                .map_err(|e| format!("解析 Releases 列表失败: {}", format_error_chain(&e)))?;
             list.into_iter().find(|r| !r.draft)
         } else if list_status == reqwest::StatusCode::UNAUTHORIZED
             || list_status == reqwest::StatusCode::FORBIDDEN
@@ -590,18 +627,18 @@ async fn download_text_asset(
     api_url: Option<&str>,
     browser_url: &str,
 ) -> Result<String, String> {
-    let req = match (token, api_url) {
-        (Some(t), Some(api)) => client
-            .get(api)
-            .bearer_auth(t)
-            .header("Accept", "application/octet-stream")
-            .header("X-GitHub-Api-Version", "2022-11-28"),
-        _ => client.get(browser_url),
-    };
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("下载 SHA256SUMS.txt 失败: {e}"))?;
+    let resp = send_get_with_retry(
+        || match (token, api_url) {
+            (Some(t), Some(api)) => client
+                .get(api)
+                .bearer_auth(t)
+                .header("Accept", "application/octet-stream")
+                .header("X-GitHub-Api-Version", "2022-11-28"),
+            _ => client.get(browser_url),
+        },
+        "下载 SHA256SUMS.txt 失败",
+    )
+    .await?;
     if !resp.status().is_success() {
         return Err(format!(
             "下载 SHA256SUMS.txt 返回 HTTP {}",
@@ -610,7 +647,7 @@ async fn download_text_asset(
     }
     resp.text()
         .await
-        .map_err(|e| format!("读取 SHA256SUMS.txt 文本失败: {e}"))
+        .map_err(|e| format!("读取 SHA256SUMS.txt 文本失败: {}", format_error_chain(&e)))
 }
 
 pub async fn download_and_apply_update(
@@ -681,7 +718,7 @@ pub async fn download_and_apply_update(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| format!("连接 GitHub 下载资产失败: {e}"))?;
+        .map_err(|e| format!("连接 GitHub 下载资产失败: {}", format_error_chain(&e)))?;
     if !resp.status().is_success() {
         return Err(format!("下载新版本返回 HTTP {}", resp.status()));
     }
@@ -990,5 +1027,28 @@ mod tests {
         assert_eq!(cleared.repo, "NGLS-ls/LumenHID");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn formats_nested_error_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out");
+        assert_eq!(format_error_chain(&io_err), "connect timed out");
+    }
+
+    #[test]
+    #[ignore = "Read-only live GitHub Releases check"]
+    fn live_readonly_github_update_check() {
+        let tmp = std::env::temp_dir().join(format!("lumenhid_live_update_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(check_for_update(&tmp));
+        let _ = fs::remove_dir_all(&tmp);
+
+        let info = res.expect("GitHub Releases live check failed");
+        println!("Live GitHub check: {:?}", info);
+        assert!(!info.auth_required, "Public repo should not require auth");
+        assert!(info.tag_name.is_some(), "Expected at least one published tag");
     }
 }

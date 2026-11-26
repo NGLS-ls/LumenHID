@@ -179,6 +179,7 @@ export default function App() {
         showNotice(res.data.detail);
       }
     } else {
+      setUpdateInfo((prev) => (prev?.auth_required ? null : prev));
       setUpdateError(res.error);
       if (!silent) {
         showNotice(res.error);

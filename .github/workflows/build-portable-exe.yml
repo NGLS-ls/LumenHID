@@ -80,6 +80,25 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Sync version from Git tag (when pushing v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -match '^v?(\d+\.\d+\.\d+)') {
+            $ver = $Matches[1]
+            Write-Host "Syncing build version to $ver from tag $tag"
+            $cargoPath = "src-tauri/Cargo.toml"
+            $cargo = Get-Content -Raw -Path $cargoPath
+            $cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]+"', "version = `"$ver`""
+            Set-Content -NoNewline -Encoding UTF8 -Path $cargoPath -Value $cargo
+
+            $confPath = "src-tauri/tauri.conf.json"
+            $conf = Get-Content -Raw -Path $confPath
+            $conf = $conf -replace '"version"\s*:\s*"[^"]+"', "`"version`": `"$ver`""
+            Set-Content -NoNewline -Encoding UTF8 -Path $confPath -Value $conf
+          }
+
       - name: Build standalone portable EXE with embedded asset protocol (no installer)
         shell: pwsh
         run: |
