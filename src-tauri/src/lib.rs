@@ -651,21 +651,26 @@ async fn apply_headset_led(
     mode: u8,
 ) -> Result<HidDispatchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let vid = parse_hex_id(&vendor_id).unwrap_or(0);
-        let pid = parse_hex_id(&product_id).unwrap_or(0);
-        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
-        let pkt = protocols::hecate_g5max::apply_g5max_led_mode(&api, &led_path, vid, pid, mode)?;
-        let mode_label = match mode.min(4) {
+        let mode_label = match mode {
             0 => "关闭",
             1 => "常亮",
             2 => "呼吸",
             3 => "幻彩循环",
-            _ => "自定义",
+            _ => {
+                return Err(format!(
+                    "安全护栏拦截：不支持的 HECATE 灯效模式编号 {mode}（仅允许 0..=3）"
+                ))
+            }
         };
+        let vid = parse_hex_id(&vendor_id).unwrap_or(0);
+        let pid = parse_hex_id(&product_id).unwrap_or(0);
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        let packets = protocols::hecate_g5max::apply_g5max_led_mode(&api, &led_path, vid, pid, mode)?;
+        let report_bytes: Vec<u8> = packets.iter().flat_map(|p| p.iter().copied()).collect();
         Ok(HidDispatchResult {
             dispatched_to_hardware: true,
-            report_bytes: pkt.to_vec(),
-            detail: format!("HECATE 耳机 RGB 灯效已切换为：{mode_label}"),
+            report_bytes,
+            detail: format!("HECATE 耳机 RGB 灯效已切换为：{mode_label}（已通过 0xED 协议边界校验）"),
         })
     })
     .await
