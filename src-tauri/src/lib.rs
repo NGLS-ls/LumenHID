@@ -23,6 +23,7 @@ use win_battery::query_windows_bluetooth_devices;
 static ACTIVE_KEYBOARD_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 static ACTIVE_MOUSE_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 static ACTIVE_AUDIO_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+static ACTIVE_CHASSIS_RGB_CFG: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
 
 fn active_kbd_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
     ACTIVE_KEYBOARD_CFG.get_or_init(|| Mutex::new(None))
@@ -34,6 +35,10 @@ fn active_mouse_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
 
 fn active_audio_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
     ACTIVE_AUDIO_CFG.get_or_init(|| Mutex::new(None))
+}
+
+fn active_chassis_rgb_cfg_lock() -> &'static Mutex<Option<serde_json::Value>> {
+    ACTIVE_CHASSIS_RGB_CFG.get_or_init(|| Mutex::new(None))
 }
 
 fn make_telemetry_callback(app: tauri::AppHandle) -> TelemetryCallback {
@@ -772,6 +777,163 @@ async fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn get_chassis_rgb_capabilities(
+) -> Result<protocols::motherboard_argb::ChassisRgbCapabilities, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        Ok(protocols::motherboard_argb::probe_chassis_rgb_capabilities(&api))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn apply_chassis_rgb_config(
+    config: protocols::motherboard_argb::ChassisLightingConfig,
+) -> Result<protocols::motherboard_argb::ChassisLightingDispatchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if safety::is_readonly_mode() {
+            return Ok(protocols::motherboard_argb::ChassisLightingDispatchResult {
+                dispatched_to_hardware: false,
+                packet_count: 0,
+                preview_bytes: Vec::new(),
+                detail: "全局只读安全模式已开启：已保存主机灯效配置，暂不下发主板 ARGB 指令"
+                    .to_string(),
+            });
+        }
+
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        let caps = protocols::motherboard_argb::probe_chassis_rgb_capabilities(&api);
+        if !caps.available || !caps.write_supported {
+            return Ok(protocols::motherboard_argb::ChassisLightingDispatchResult {
+                dispatched_to_hardware: false,
+                packet_count: 0,
+                preview_bytes: Vec::new(),
+                detail: caps.note,
+            });
+        }
+
+        let val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
+        if let Ok(dir) = portable_data_dir() {
+            if let Ok(mut guard) = active_chassis_rgb_cfg_lock().lock() {
+                match guard.as_ref() {
+                    None => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "chassis_argb",
+                            "lighting",
+                            "initial_baseline",
+                            val.clone(),
+                        );
+                    }
+                    Some(prev) if prev != &val => {
+                        let _ = safety::save_backup(
+                            &dir,
+                            "chassis_argb",
+                            "lighting",
+                            "pre_write",
+                            prev.clone(),
+                        );
+                    }
+                    _ => {}
+                }
+                *guard = Some(val);
+            }
+        }
+
+        protocols::motherboard_argb::apply_chassis_rgb_config(&api, &caps, &config)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn reset_chassis_rgb_default() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        if safety::is_readonly_mode() {
+            return Err("全局只读安全模式已开启，已拦截主机灯效一键恢复默认操作".to_string());
+        }
+
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        let caps = protocols::motherboard_argb::probe_chassis_rgb_capabilities(&api);
+
+        if let (Ok(dir), Ok(guard)) = (portable_data_dir(), active_chassis_rgb_cfg_lock().lock())
+        {
+            if let Some(prev) = guard.as_ref() {
+                let _ = safety::save_backup(
+                    &dir,
+                    "chassis_argb",
+                    "lighting",
+                    "pre_default_reset",
+                    prev.clone(),
+                );
+            }
+        }
+
+        let (default_cfg, dispatch) =
+            protocols::motherboard_argb::reset_chassis_rgb_to_default(&api, &caps)?;
+
+        if let Ok(mut guard) = active_chassis_rgb_cfg_lock().lock() {
+            if let Ok(val) = serde_json::to_value(&default_cfg) {
+                *guard = Some(val);
+            }
+        }
+
+        Ok(serde_json::json!({
+            "lightingConfig": default_cfg,
+            "dispatch": dispatch,
+            "detail": "已一键恢复主板出厂默认彩虹流光灯效"
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn rollback_chassis_rgb_config() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        if safety::is_readonly_mode() {
+            return Err("全局只读安全模式已开启，已拦截主机灯效回滚写入".to_string());
+        }
+
+        let dir = portable_data_dir()?;
+        let current = active_chassis_rgb_cfg_lock()
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        let backups = safety::list_backups(&dir, Some("chassis_argb"));
+        let target = backups
+            .iter()
+            .find(|b| current.as_ref().map(|c| c != &b.payload).unwrap_or(true))
+            .or_else(|| backups.first())
+            .cloned()
+            .ok_or_else(|| "暂无可回滚的主机灯效历史快照".to_string())?;
+
+        let restored: protocols::motherboard_argb::ChassisLightingConfig =
+            serde_json::from_value(target.payload.clone())
+                .map_err(|e| format!("解析主机灯效快照失败: {e}"))?;
+
+        let api = HidApi::new().map_err(|e| format!("Windows 原生 HID 初始化失败: {e}"))?;
+        let caps = protocols::motherboard_argb::probe_chassis_rgb_capabilities(&api);
+        let dispatch =
+            protocols::motherboard_argb::apply_chassis_rgb_config(&api, &caps, &restored)?;
+
+        if let Ok(mut guard) = active_chassis_rgb_cfg_lock().lock() {
+            *guard = Some(target.payload);
+        }
+
+        Ok(serde_json::json!({
+            "lightingConfig": restored,
+            "dispatch": dispatch,
+            "source": target.source,
+            "detail": "已从原子快照一键回滚主板主机灯效"
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -826,6 +988,10 @@ pub fn run() {
             check_app_update,
             download_and_apply_update,
             open_external_url,
+            get_chassis_rgb_capabilities,
+            apply_chassis_rgb_config,
+            reset_chassis_rgb_default,
+            rollback_chassis_rgb_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building LumenHID Tauri application");

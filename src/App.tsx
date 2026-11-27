@@ -6,9 +6,11 @@ import { MouseView } from './components/MouseView';
 import { KeyboardView } from './components/KeyboardView';
 import { MacroStudioView } from './components/MacroStudioView';
 import { AudioStudioView } from './components/AudioStudioView';
+import { ChassisLightingView } from './components/ChassisLightingView';
 import { UpdateModal } from './components/UpdateModal';
 import {
   DEFAULT_AUDIO_CONFIG,
+  DEFAULT_CHASSIS_LIGHTING_CONFIG,
   DEFAULT_KEYBOARD_CONFIG,
   DEFAULT_MOUSE_CONFIG,
   INITIAL_MACROS,
@@ -16,6 +18,8 @@ import {
 import type {
   AppProfileSnapshot,
   AudioConfig,
+  ChassisLightingConfig,
+  ChassisLightingMode,
   KeyboardConfig,
   MacroDefinition,
   MouseConfig,
@@ -29,6 +33,7 @@ import {
   downloadAndApplyUpdate,
   downloadTextFile,
   emergencyResetKeyboardEngine,
+  getChassisRgbCapabilities,
   getKeyboardEngineStatus,
   getSafetyStatus,
   getThxStatus,
@@ -37,7 +42,9 @@ import {
   loadSavedProfile,
   openExternalUrl,
   refreshNativeBatteries,
+  resetChassisRgbDefault,
   rollbackAudioConfig,
+  rollbackChassisRgbConfig,
   rollbackKeyboardConfig,
   rollbackMouseConfig,
   saveProfileSnapshot,
@@ -46,10 +53,12 @@ import {
   setKeyboardEngineEnabled,
   setReadonlyMode,
   syncAudioHardware,
+  syncChassisRgbHardware,
   syncKeyboardHardware,
   syncMacrosToEngine,
   syncMouseHardware,
   triggerMacroHardware,
+  type ChassisRgbCapabilities,
   type KeyboardEngineStatus,
   type SafetyStatus,
   type TelemetryEventPayload,
@@ -65,7 +74,63 @@ const SECTION_BREADCRUMBS: Record<NavSection, string> = {
   keyboard: '键盘与轴体',
   macros: '宏工作台',
   audio: '音频与声场',
+  lighting: '主机灯控',
 };
+
+function reconcileLightingHeaders(
+  prev: ChassisLightingConfig,
+  caps: ChassisRgbCapabilities
+): ChassisLightingConfig {
+  if (!caps.available || caps.headers.length === 0) return prev;
+  const nextHeaders = caps.headers.map((hdr, idx) => {
+    const existing = prev.headers.find((h) => h.index === hdr.index) ?? prev.headers[idx];
+    return {
+      index: hdr.index,
+      label: existing?.label || hdr.name,
+      enabled: existing?.enabled ?? true,
+      color: existing?.color || prev.primaryColor,
+      ledCount: Math.max(
+        1,
+        Math.min(hdr.max_leds || 120, existing?.ledCount ?? hdr.default_leds ?? 30)
+      ),
+    };
+  });
+  return { ...prev, headers: nextHeaders };
+}
+
+function fromNativeLightingConfig(raw: {
+  preset_id: string;
+  mode: string;
+  primary_color: string;
+  secondary_color: string;
+  brightness: number;
+  speed: number;
+  per_header_custom: boolean;
+  headers: {
+    index: number;
+    label: string;
+    enabled: boolean;
+    color: string;
+    led_count: number;
+  }[];
+}): ChassisLightingConfig {
+  return {
+    presetId: raw.preset_id,
+    mode: raw.mode as ChassisLightingMode,
+    primaryColor: raw.primary_color,
+    secondaryColor: raw.secondary_color,
+    brightness: raw.brightness,
+    speed: raw.speed,
+    perHeaderCustom: raw.per_header_custom,
+    headers: raw.headers.map((h) => ({
+      index: h.index,
+      label: h.label,
+      enabled: h.enabled,
+      color: h.color,
+      ledCount: h.led_count,
+    })),
+  };
+}
 
 export default function App() {
   const initialSnapshot = loadSavedProfile();
@@ -92,12 +157,16 @@ export default function App() {
   const [audioConfig, setAudioConfig] = useState<AudioConfig>(
     initialSnapshot?.audioConfig ?? DEFAULT_AUDIO_CONFIG
   );
+  const [lightingConfig, setLightingConfig] = useState<ChassisLightingConfig>(
+    initialSnapshot?.lightingConfig ?? DEFAULT_CHASSIS_LIGHTING_CONFIG
+  );
 
   const [notice, setNotice] = useState<string | null>(null);
   const [keyboardEngineStatus, setKeyboardEngineStatus] = useState<KeyboardEngineStatus | null>(
     null
   );
   const [thxStatus, setThxStatus] = useState<ThxStatus | null>(null);
+  const [chassisRgb, setChassisRgb] = useState<ChassisRgbCapabilities | null>(null);
   const [safetyStatus, setSafetyStatus] = useState<SafetyStatus | null>(null);
   const [updaterSettings, setUpdaterSettings] = useState<UpdaterSettingsView | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
@@ -126,16 +195,38 @@ export default function App() {
     });
   }, []);
 
-  // Auto-discover real Windows native HID & Bluetooth PnP devices asynchronously on launch
+  // Auto-discover real Windows native HID & Bluetooth PnP devices + motherboard ARGB capabilities on launch
+  const refreshChassisRgbCapabilities = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    const caps = await getChassisRgbCapabilities();
+    if (!caps) return;
+    setChassisRgb(caps);
+    if (caps.available) {
+      setLightingConfig((prev) => reconcileLightingHeaders(prev, caps));
+    } else {
+      setActiveSection((sec) => (sec === 'lighting' ? 'devices' : sec));
+    }
+  }, []);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let cancelled = false;
     setScanning(true);
-    void scanNativeWindowsDevices().then((nativeDevs) => {
-      if (cancelled) return;
-      mergeScannedDevices(nativeDevs);
-      setScanning(false);
-    });
+    void Promise.all([scanNativeWindowsDevices(), getChassisRgbCapabilities()]).then(
+      ([nativeDevs, caps]) => {
+        if (cancelled) return;
+        mergeScannedDevices(nativeDevs);
+        if (caps) {
+          setChassisRgb(caps);
+          if (caps.available) {
+            setLightingConfig((prev) => reconcileLightingHeaders(prev, caps));
+          } else {
+            setActiveSection((sec) => (sec === 'lighting' ? 'devices' : sec));
+          }
+        }
+        setScanning(false);
+      }
+    );
     return () => {
       cancelled = true;
     };
@@ -353,6 +444,7 @@ export default function App() {
         keyboardConfig,
         macros,
         audioConfig,
+        lightingConfig,
       };
       void saveProfileSnapshot(snapshot);
     }, 450);
@@ -361,7 +453,7 @@ export default function App() {
         window.clearTimeout(saveTimerRef.current);
       }
     };
-  }, [activeDeviceId, devices, mouseConfig, keyboardConfig, macros, audioConfig]);
+  }, [activeDeviceId, devices, mouseConfig, keyboardConfig, macros, audioConfig, lightingConfig]);
 
   const mouseDevice =
     devices.find((d) => d.category === 'mouse' && d.id === activeDeviceId) ??
@@ -391,12 +483,12 @@ export default function App() {
       return;
     }
     setScanning(true);
-    const found = await scanNativeWindowsDevices();
+    const [found] = await Promise.all([scanNativeWindowsDevices(), refreshChassisRgbCapabilities()]);
     mergeScannedDevices(found);
     setScanning(false);
     showNotice(
       found.length > 0
-        ? `已刷新 ${found.length} 台本机物理外设与实时电量`
+        ? `已刷新 ${found.length} 台本机物理外设与主机 ARGB 状态`
         : '未扫描到外接键鼠或蓝牙耳机（已过滤系统音频端点）'
     );
   };
@@ -540,6 +632,57 @@ export default function App() {
     });
   };
 
+  const handleLightingChange = (next: ChassisLightingConfig) => {
+    setLightingConfig(next);
+    if (chassisRgb?.available && chassisRgb.write_supported) {
+      syncChassisRgbHardware(
+        next,
+        (res) => {
+          refreshSafetyStatus();
+          if (!res.dispatched_to_hardware) {
+            showNotice(res.detail);
+          }
+        },
+        (err) => {
+          showNotice(err);
+        }
+      );
+    }
+  };
+
+  const handleResetChassisLighting = () => {
+    if (!isTauriRuntime()) {
+      setLightingConfig(DEFAULT_CHASSIS_LIGHTING_CONFIG);
+      showNotice('主机灯效配置已恢复为出厂彩虹流光');
+      return;
+    }
+    void resetChassisRgbDefault().then((res) => {
+      if (!res.ok) {
+        showNotice(res.error);
+        return;
+      }
+      if (res.data.lightingConfig) {
+        setLightingConfig(fromNativeLightingConfig(res.data.lightingConfig));
+      }
+      refreshSafetyStatus();
+      showNotice(res.data.dispatch?.detail || res.data.detail);
+    });
+  };
+
+  const handleRollbackChassisLighting = () => {
+    void rollbackChassisRgbConfig().then((res) => {
+      if (!res.ok) {
+        showNotice(res.error);
+        return;
+      }
+      if (res.data.lightingConfig) {
+        setLightingConfig(fromNativeLightingConfig(res.data.lightingConfig));
+      }
+      refreshSafetyStatus();
+      showNotice(res.data.detail);
+    });
+  };
+
   const handleExportProfile = () => {
     const snapshot: AppProfileSnapshot = {
       schemaVersion: '2.0.0',
@@ -550,6 +693,7 @@ export default function App() {
       keyboardConfig,
       macros,
       audioConfig,
+      lightingConfig,
     };
     downloadTextFile(
       'LumenHID-portable-profile.json',
@@ -570,6 +714,9 @@ export default function App() {
     setKeyboardConfig(result.data.keyboardConfig);
     setMacros(result.data.macros);
     setAudioConfig(result.data.audioConfig);
+    if (result.data.lightingConfig) {
+      setLightingConfig(result.data.lightingConfig);
+    }
     showNotice('已成功导入便携配置文件');
     return { ok: true, message: '配置文件校验通过并已全部应用。' };
   };
@@ -590,6 +737,22 @@ export default function App() {
       }
       refreshSafetyStatus();
     });
+    if (chassisRgb?.available && chassisRgb.write_supported) {
+      syncChassisRgbHardware(
+        lightingConfig,
+        (res) => {
+          if (activeSection === 'lighting') {
+            showNotice(res.detail);
+          }
+          refreshSafetyStatus();
+        },
+        (err) => {
+          if (activeSection === 'lighting') {
+            showNotice(err);
+          }
+        }
+      );
+    }
     const snapshot: AppProfileSnapshot = {
       schemaVersion: '2.0.0',
       exportedAt: new Date().toISOString(),
@@ -599,6 +762,7 @@ export default function App() {
       keyboardConfig,
       macros,
       audioConfig,
+      lightingConfig,
     };
     void saveProfileSnapshot(snapshot);
     showNotice('已异步下发支持协议的硬件参数并写入便携目录');
@@ -623,6 +787,7 @@ export default function App() {
             void handleCheckUpdate(false);
           }
         }}
+        chassisRgb={chassisRgb}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -704,10 +869,12 @@ export default function App() {
                 scanning={scanning}
                 safetyStatus={safetyStatus}
                 keyboardEngineStatus={keyboardEngineStatus}
+                chassisRgb={chassisRgb}
                 onSelectDeviceAndOpen={(dev, sec) => {
                   setActiveDeviceId(dev.id);
                   setActiveSection(sec);
                 }}
+                onOpenChassisLighting={() => setActiveSection('lighting')}
                 onRefreshDevices={handleRefreshDevices}
                 onMergeScannedDevices={mergeScannedDevices}
                 onExportProfile={handleExportProfile}
@@ -777,6 +944,16 @@ export default function App() {
                   showNotice('均衡器曲线已重置为纯净原声');
                 }}
                 onExportApoNotice={(msg) => showNotice(msg)}
+              />
+            )}
+
+            {activeSection === 'lighting' && chassisRgb?.available && (
+              <ChassisLightingView
+                capabilities={chassisRgb}
+                config={lightingConfig}
+                onChange={handleLightingChange}
+                onResetDefault={handleResetChassisLighting}
+                onRollback={handleRollbackChassisLighting}
               />
             )}
           </div>

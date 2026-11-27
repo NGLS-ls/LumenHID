@@ -744,3 +744,132 @@ export async function openExternalUrl(
 ): Promise<{ ok: true; data: null } | { ok: false; error: string }> {
   return invokeNativeResult<null>('open_external_url', { url });
 }
+
+export interface ArgbHeaderInfo {
+  index: number;
+  effect_channel: number;
+  direct_channel: number;
+  name: string;
+  header_type: 'argb_gen2' | 'onboard' | 'rgb_12v' | string;
+  max_leds: number;
+  default_leds: number;
+}
+
+export interface ChassisRgbCapabilities {
+  available: boolean;
+  vendor: string;
+  protocol: string;
+  motherboard_name: string;
+  controller_name: string;
+  firmware_version: string | null;
+  vendor_id: string;
+  product_id: string;
+  hid_path: string | null;
+  write_supported: boolean;
+  conflict_service_running: string | null;
+  headers: ArgbHeaderInfo[];
+  supported_modes: string[];
+  note: string;
+}
+
+export interface ChassisLightingDispatchResult {
+  dispatched_to_hardware: boolean;
+  packet_count: number;
+  preview_bytes: number[];
+  detail: string;
+}
+
+export interface ChassisLightingRollbackResult {
+  lightingConfig: {
+    preset_id: string;
+    mode: string;
+    primary_color: string;
+    secondary_color: string;
+    brightness: number;
+    speed: number;
+    per_header_custom: boolean;
+    headers: {
+      index: number;
+      label: string;
+      enabled: boolean;
+      color: string;
+      led_count: number;
+    }[];
+  };
+  dispatch: ChassisLightingDispatchResult;
+  source?: string;
+  detail: string;
+}
+
+let chassisLightingSyncTimer: number | null = null;
+
+export async function getChassisRgbCapabilities(): Promise<ChassisRgbCapabilities | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeNativeCommand<ChassisRgbCapabilities>('get_chassis_rgb_capabilities');
+}
+
+function toNativeChassisLightingPayload(cfg: {
+  presetId: string;
+  mode: string;
+  primaryColor: string;
+  secondaryColor: string;
+  brightness: number;
+  speed: number;
+  perHeaderCustom: boolean;
+  headers: {
+    index: number;
+    label: string;
+    enabled: boolean;
+    color: string;
+    ledCount: number;
+  }[];
+}) {
+  return {
+    preset_id: cfg.presetId,
+    mode: cfg.mode,
+    primary_color: cfg.primaryColor,
+    secondary_color: cfg.secondaryColor,
+    brightness: cfg.brightness,
+    speed: cfg.speed,
+    per_header_custom: cfg.perHeaderCustom,
+    headers: cfg.headers.map((h) => ({
+      index: h.index,
+      label: h.label,
+      enabled: h.enabled,
+      color: h.color,
+      led_count: h.ledCount,
+    })),
+  };
+}
+
+export function syncChassisRgbHardware(
+  config: Parameters<typeof toNativeChassisLightingPayload>[0],
+  onResult?: (res: ChassisLightingDispatchResult) => void,
+  onError?: (err: string) => void
+): void {
+  if (!isTauriRuntime()) return;
+  if (chassisLightingSyncTimer !== null) window.clearTimeout(chassisLightingSyncTimer);
+  chassisLightingSyncTimer = window.setTimeout(() => {
+    void invokeNativeResult<ChassisLightingDispatchResult>('apply_chassis_rgb_config', {
+      config: toNativeChassisLightingPayload(config),
+    }).then((res) => {
+      if (res.ok) {
+        onResult?.(res.data);
+      } else {
+        onError?.(res.error);
+      }
+    });
+  }, 120);
+}
+
+export async function resetChassisRgbDefault(): Promise<
+  { ok: true; data: ChassisLightingRollbackResult } | { ok: false; error: string }
+> {
+  return invokeNativeResult<ChassisLightingRollbackResult>('reset_chassis_rgb_default');
+}
+
+export async function rollbackChassisRgbConfig(): Promise<
+  { ok: true; data: ChassisLightingRollbackResult } | { ok: false; error: string }
+> {
+  return invokeNativeResult<ChassisLightingRollbackResult>('rollback_chassis_rgb_config');
+}

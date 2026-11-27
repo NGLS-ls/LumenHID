@@ -15,6 +15,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Upload,
   Usb,
   X,
@@ -32,6 +33,7 @@ import {
   isTauriRuntime,
   scanRealDevices,
   supportsWebHid,
+  type ChassisRgbCapabilities,
   type KeyboardEngineStatus,
   type SafetyStatus,
 } from '../services/deviceBridge';
@@ -42,7 +44,9 @@ interface DevicesViewProps {
   scanning: boolean;
   safetyStatus?: SafetyStatus | null;
   keyboardEngineStatus?: KeyboardEngineStatus | null;
+  chassisRgb?: ChassisRgbCapabilities | null;
   onSelectDeviceAndOpen: (device: PeripheralDevice, section: NavSection) => void;
+  onOpenChassisLighting?: () => void;
   onRefreshDevices: () => Promise<void>;
   onMergeScannedDevices: (found: PeripheralDevice[]) => void;
   onExportProfile: () => void;
@@ -130,7 +134,9 @@ export function DevicesView({
   scanning,
   safetyStatus,
   keyboardEngineStatus,
+  chassisRgb,
   onSelectDeviceAndOpen,
+  onOpenChassisLighting,
   onRefreshDevices,
   onMergeScannedDevices,
   onExportProfile,
@@ -549,6 +555,42 @@ export function DevicesView({
           </div>
         </div>
       </section>
+
+      {/* Conditional Chassis Motherboard ARGB Entry Card */}
+      {chassisRgb?.available && onOpenChassisLighting && (
+        <section className="rounded-2xl border border-[#C4DCD9] bg-[#F4F8F7] p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#2B6B68] text-white">
+                <Sparkles className="h-4.5 w-4.5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-sm font-semibold text-[#181C20]">
+                    已检测主板 ARGB 灯控：{chassisRgb.motherboard_name}
+                  </h2>
+                  <span className="rounded-md bg-white px-2 py-0.5 font-mono text-[11px] font-medium text-[#1D4E4C]">
+                    {chassisRgb.controller_name}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-[#586370]">
+                  已识别 {chassisRgb.headers.length} 路 5V ARGB/板载灯区
+                  {chassisRgb.firmware_version ? `（固件 ${chassisRgb.firmware_version}）` : ''}，支持一键默认彩虹流光、8 套内置灯效与三针脚独立配色。
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={onOpenChassisLighting}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[#2B6B68] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#215452] transition-colors whitespace-nowrap"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>进入主机灯控</span>
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Device Grid or Clean Real-Hardware Empty State */}
       {devices.length === 0 ? (

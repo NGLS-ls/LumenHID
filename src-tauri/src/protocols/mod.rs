@@ -2,6 +2,7 @@
 
 pub mod hecate_g5max;
 pub mod inphic_in10;
+pub mod motherboard_argb;
 pub mod thx_grpc;
 
 use serde::{Deserialize, Serialize};

@@ -4,11 +4,12 @@ import {
   Headphones,
   Keyboard,
   Mouse,
+  Sparkles,
   Workflow,
   X,
 } from 'lucide-react';
 import type { NavSection, PeripheralDevice } from '../types/peripheral';
-import type { UpdateCheckResult } from '../services/deviceBridge';
+import type { ChassisRgbCapabilities, UpdateCheckResult } from '../services/deviceBridge';
 
 interface SidebarProps {
   activeSection: NavSection;
@@ -22,9 +23,10 @@ interface SidebarProps {
   updateInfo?: UpdateCheckResult | null;
   checkingUpdate?: boolean;
   onOpenUpdateModal?: () => void;
+  chassisRgb?: ChassisRgbCapabilities | null;
 }
 
-const NAV_ITEMS: { id: NavSection; label: string; icon: typeof Cpu }[] = [
+const BASE_NAV_ITEMS: { id: NavSection; label: string; icon: typeof Cpu }[] = [
   { id: 'devices', label: '设备总览', icon: Cpu },
   { id: 'mouse', label: '鼠标调校', icon: Mouse },
   { id: 'keyboard', label: '键盘与轴体', icon: Keyboard },
@@ -56,7 +58,12 @@ export function Sidebar({
   updateInfo,
   checkingUpdate,
   onOpenUpdateModal,
+  chassisRgb,
 }: SidebarProps) {
+  const navItems = chassisRgb?.available
+    ? [...BASE_NAV_ITEMS, { id: 'lighting' as NavSection, label: '主机灯控', icon: Sparkles }]
+    : BASE_NAV_ITEMS;
+
   const navContent = (
     <div className="flex h-full flex-col bg-white border-r border-[#E5E9EE]">
       <div className="flex h-16 items-center justify-between px-5 border-b border-[#E5E9EE]">
@@ -82,7 +89,7 @@ export function Sidebar({
 
       <nav aria-label="主功能导航" className="flex-1 overflow-y-auto px-3 py-5">
         <ul className="space-y-1">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeSection === item.id;
             return (

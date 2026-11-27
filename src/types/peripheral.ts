@@ -1,7 +1,7 @@
 export type ConnectionProtocol = '2.4g' | 'bluetooth' | 'usb';
 export type ProtocolFilter = 'all' | ConnectionProtocol;
 export type DeviceCategory = 'mouse' | 'keyboard' | 'headset';
-export type NavSection = 'devices' | 'mouse' | 'keyboard' | 'macros' | 'audio';
+export type NavSection = 'devices' | 'mouse' | 'keyboard' | 'macros' | 'audio' | 'lighting';
 
 export type BatterySource = 'windows-bt' | 'hid-vendor' | 'wired' | 'unavailable';
 export type ProtocolSupportLevel =
@@ -161,6 +161,49 @@ export interface AudioConfig {
   customPresets: AudioPreset[];
 }
 
+export type ChassisLightingMode =
+  | 'rainbow'
+  | 'wave'
+  | 'spectrum'
+  | 'static'
+  | 'breathing'
+  | 'chase-fade'
+  | 'direct-gradient'
+  | 'direct-per-header'
+  | 'off';
+
+export interface HeaderLightingZoneConfig {
+  index: number;
+  label: string;
+  enabled: boolean;
+  color: string;
+  ledCount: number;
+}
+
+export interface ChassisLightingPreset {
+  id: string;
+  name: string;
+  description: string;
+  mode: ChassisLightingMode;
+  primaryColor: string;
+  secondaryColor: string;
+  brightness: number;
+  speed: number;
+  perHeaderCustom: boolean;
+  headerColors?: string[];
+}
+
+export interface ChassisLightingConfig {
+  presetId: string;
+  mode: ChassisLightingMode;
+  primaryColor: string;
+  secondaryColor: string;
+  brightness: number;
+  speed: number;
+  perHeaderCustom: boolean;
+  headers: HeaderLightingZoneConfig[];
+}
+
 export interface AppProfileSnapshot {
   schemaVersion: '2.0.0';
   exportedAt: string;
@@ -170,4 +213,5 @@ export interface AppProfileSnapshot {
   keyboardConfig: KeyboardConfig;
   macros: MacroDefinition[];
   audioConfig: AudioConfig;
+  lightingConfig?: ChassisLightingConfig;
 }

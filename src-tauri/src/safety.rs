@@ -71,7 +71,14 @@ impl HardwareSafetyGuard {
         let allowed = matches!(
             (vid, pid),
             (0x1D57, 0xFA65) | (0x35BB, 0xA00B) | (0x35BB, 0xA211)
-        );
+        ) || (op_lower.starts_with("motherboard_argb")
+            && matches!(
+                (vid, pid),
+                (0x0B05, 0x18F3 | 0x1939 | 0x19AF | 0x1AA6 | 0x1BED)
+                    | (0x048D, 0x8297 | 0x8950 | 0x5702 | 0x5711)
+                    | (0x0414, 0xA100)
+                    | (0x26CE, 0x01A2 | 0x01A6)
+            ));
         if !allowed {
             return Err(format!(
                 "设备 0x{vid:04X}:0x{pid:04X} 未列入已验证写协议白名单，已降级为只读保护（{op_desc}）"
@@ -290,6 +297,9 @@ mod tests {
 
         assert!(HardwareSafetyGuard::check_write_allowed(0x1D57, 0xFA65, "write_polling_rate").is_ok());
         assert!(HardwareSafetyGuard::check_write_allowed(0x35BB, 0xA00B, "write_led").is_ok());
+        assert!(HardwareSafetyGuard::check_write_allowed(0x0B05, 0x19AF, "motherboard_argb_apply").is_ok());
+        assert!(HardwareSafetyGuard::check_write_allowed(0x0B05, 0x19AF, "firmware_upgrade").is_err());
+        assert!(HardwareSafetyGuard::check_write_allowed(0x1462, 0x7C37, "motherboard_argb_apply").is_err());
     }
 
     #[test]
